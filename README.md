@@ -1,12 +1,5 @@
 # SnappyMovement
 
-**Borderlands 3 PythonSDK / Oak mod**
-
-Current release: **v1.0**
-
-> Ready-to-install `.sdkmod` builds are published under **Releases**.  
-> Files in this repository are the mod source.
-
 SnappyMovement makes Borderlands 3 ground movement more responsive by reducing acceleration and stopping inertia without increasing the game's normal movement speed.
 
 The mod changes only the local player's `MaxAcceleration` and `BrakingDecelerationWalking`. It does not intentionally change maximum walk speed, maximum sprint speed, `GroundFriction`, jump settings, air control, or slide speed.
