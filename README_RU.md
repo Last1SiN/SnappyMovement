@@ -99,6 +99,6 @@ Oak Mod Manager v1.11 уже включает Mods Base 1.12, BL3 Mod Menu 1.8, 
 
 ## Credits
 
-- **Создатель мода / код:** Sol (ChatGPT, GPT-5.6 Sol)
-- **QA / сопровождение:** [Last1SiN](https://github.com/Last1SiN)
+- **Development:** Sol / GPT-5.6 Sol
+- **Design, testing & QA:** Last1SiN
 - **BL3 PythonSDK / Oak Mod Manager:** создан [apple1417](https://github.com/apple1417) при участии проекта и контрибьюторов [BL-SDK](https://github.com/bl-sdk).
