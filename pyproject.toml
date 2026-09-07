@@ -1,9 +1,9 @@
 [project]
 name = "SnappyMovement"
 version = "1.0"
-description = "Makes Borderlands 3 ground movement more responsive by reducing acceleration and stopping inertia without increasing the game's normal movement speed."
+description = "Makes Borderlands 3 ground movement more responsive by reducing acceleration ramp-up time and stopping inertia without increasing the game's normal movement speed."
 authors = [
-    { name = "Sol (ChatGPT, GPT-5.6 Sol)" }
+    { name = "Sol / GPT-5.6 Sol" }
 ]
 maintainers = [
     { name = "Last1SiN" }
