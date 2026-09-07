@@ -78,7 +78,6 @@ Oak Mod Manager v1.11 includes Mods Base 1.12, BL3 Mod Menu 1.8, Console Mod Men
 
    `Borderlands 3\sdk_mods\`
 
-9. Remove any older `No_Movement_Inertia_*.bl3hotfix` builds from OpenHotfixLoader's `ohl-mods` folder so they cannot apply the same movement properties at the same time.
 10. Start/restart Borderlands 3, open **MODS -> SnappyMovement**, enable the mod, and open **Options** to select a profile or tune the sliders.
 
 To update SnappyMovement, replace the existing `SnappyMovement.sdkmod` with the newer file and restart the game.
