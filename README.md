@@ -1,6 +1,6 @@
 # SnappyMovement
 
-SnappyMovement makes Borderlands 3 ground movement more responsive and closer to Borderlands 2 by reducing acceleration and stopping inertia without increasing the game's normal movement speed.
+SnappyMovement makes Borderlands 3 ground movement more responsive and closer to Borderlands 2 by reducing acceleration ramp-up time and stopping inertia without increasing the game's normal movement speed.
 
 The mod changes only the local player's `MaxAcceleration` and `BrakingDecelerationWalking`. It does not intentionally change maximum walk speed, maximum sprint speed, `GroundFriction`, jump settings, air control, or slide speed.
 
