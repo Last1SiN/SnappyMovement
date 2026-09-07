@@ -17,5 +17,5 @@ name = "SnappyMovement"
 version = "1.0"
 license = { name = "GPL3", url = "https://choosealicense.com/licenses/gpl-3.0/" }
 download = "https://github.com/Last1SiN/SnappyMovement/releases/latest/download/SnappyMovement.sdkmod"
-coop_support = "ClientSide"
+coop_support = "Unknown"
 supported_games = ["BL3"]
