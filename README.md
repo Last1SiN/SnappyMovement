@@ -75,7 +75,7 @@ To update SnappyMovement, replace the existing `.sdkmod` with the newer file and
 - Character scope: local player's runtime movement component.
 - Co-op support: **Unknown** — behavior with the mod installed only on a client while the host does not have it has not yet been validated.
 - The mod does not intentionally alter maximum movement speed, `GroundFriction`, jump settings, air control or slide speed.
-- License: **GPL-3.0**
+- License: **GNU GPLv3 with [Section 7 additional provenance terms](ADDITIONAL_TERMS.md)**
 
 ## Credits
 
