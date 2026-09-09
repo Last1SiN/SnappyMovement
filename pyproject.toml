@@ -11,11 +11,12 @@ maintainers = [
 
 [project.urls]
 Repository = "https://github.com/Last1SiN/SnappyMovement"
+AdditionalTerms = "https://github.com/Last1SiN/SnappyMovement/blob/main/ADDITIONAL_TERMS.md"
 
 [tool.sdkmod]
 name = "SnappyMovement"
 version = "1.0"
-license = { name = "GPL3", url = "https://choosealicense.com/licenses/gpl-3.0/" }
+license = { name = "GPL3 + Section 7 terms", url = "https://github.com/Last1SiN/SnappyMovement/blob/main/ADDITIONAL_TERMS.md" }
 download = "https://github.com/Last1SiN/SnappyMovement/releases/latest/download/SnappyMovement.sdkmod"
 coop_support = "Unknown"
 supported_games = ["BL3"]
