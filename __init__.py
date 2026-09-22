@@ -84,7 +84,7 @@ class _MovementPatch:
     owned_brake: float | None = None
 
 
-_active_patch: _MovementPatch | None = None
+_patches: dict[int, _MovementPatch] = {}
 
 
 def _error(message: str) -> None:
@@ -98,7 +98,6 @@ def _path(obj: Any) -> str:
         return str(obj._path_name())
     except Exception:
         return "<unreadable-path>"
-
 
 
 def _object_key(obj: UObject) -> int:
@@ -226,8 +225,6 @@ def _apply_to_pawn(
     *,
     report_failure: bool = False,
 ) -> None:
-    global _active_patch
-
     if pawn is None:
         return
 
@@ -238,8 +235,9 @@ def _apply_to_pawn(
         return
 
     key = _object_key(component)
+    patch = _patches.get(key)
 
-    if _active_patch is None or _active_patch.component_key != key:
+    if patch is None:
         try:
             old_accel = float(component.MaxAcceleration)
             old_brake = float(component.BrakingDecelerationWalking)
@@ -247,13 +245,12 @@ def _apply_to_pawn(
             _error(f"could not read original movement values from {_path(component)}: {exc}")
             return
 
-        _active_patch = _MovementPatch(
+        patch = _MovementPatch(
             component_key=key,
             original_accel=old_accel,
             original_brake=old_brake,
         )
-
-    patch = _active_patch
+        _patches[key] = patch
 
     try:
         current_accel = float(component.MaxAcceleration)
@@ -295,40 +292,43 @@ def _apply_to_pawn(
 
 
 def _restore_all() -> None:
-    global _active_patch
-
-    patch = _active_patch
-    _active_patch = None
-
-    if patch is None:
-        return
-
-    # Resolve the current component fresh instead of dereferencing a stored UObject.
     component = _get_move_component(_get_current_pawn())
-    if component is None or _object_key(component) != patch.component_key:
-        return
+    if component is not None:
+        key = _object_key(component)
+        patch = _patches.get(key)
 
-    if patch.owned_accel is not None:
-        try:
-            current_accel = float(component.MaxAcceleration)
-        except Exception:
-            current_accel = None
-        if current_accel is not None and _same_value(current_accel, patch.owned_accel):
-            try:
-                component.MaxAcceleration = patch.original_accel
-            except Exception:
-                pass
+        if patch is not None:
+            if patch.owned_accel is not None:
+                try:
+                    current_accel = float(component.MaxAcceleration)
+                except Exception:
+                    current_accel = None
+                if (
+                    current_accel is not None
+                    and _same_value(current_accel, patch.owned_accel)
+                ):
+                    try:
+                        component.MaxAcceleration = patch.original_accel
+                    except Exception:
+                        pass
 
-    if patch.owned_brake is not None:
-        try:
-            current_brake = float(component.BrakingDecelerationWalking)
-        except Exception:
-            current_brake = None
-        if current_brake is not None and _same_value(current_brake, patch.owned_brake):
-            try:
-                component.BrakingDecelerationWalking = patch.original_brake
-            except Exception:
-                pass
+            if patch.owned_brake is not None:
+                try:
+                    current_brake = float(component.BrakingDecelerationWalking)
+                except Exception:
+                    current_brake = None
+                if (
+                    current_brake is not None
+                    and _same_value(current_brake, patch.owned_brake)
+                ):
+                    try:
+                        component.BrakingDecelerationWalking = patch.original_brake
+                    except Exception:
+                        pass
+
+    # Records contain scalar state only. Dropping historical pawn records never
+    # dereferences old-world UObjects.
+    _patches.clear()
 
 
 def _on_enable() -> None:
