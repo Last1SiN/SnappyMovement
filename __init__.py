@@ -106,6 +106,7 @@ def _object_key(obj: UObject) -> int:
     except Exception:
         return id(obj)
 
+
 def _safe_value(
     raw: Any,
     default: float,
