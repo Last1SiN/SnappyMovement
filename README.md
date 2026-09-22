@@ -15,7 +15,7 @@ The mod changes only the local player's `MaxAcceleration` and `BrakingDecelerati
 - Includes three presets plus manual control.
 - Applies option changes immediately while enabled.
 - Reapplies the selected settings to a new local-player pawn after respawn or map transitions.
-- Restores the movement values captured before SnappyMovement changed them when the mod is disabled.
+- Restores owned movement values on disable without overwriting later external changes.
 - Normal gameplay logging is limited to errors.
 
 ## Profiles
