@@ -77,14 +77,14 @@ _syncing_options = False
 
 @dataclass(slots=True)
 class _MovementPatch:
-    component_key: str
+    component_key: int
     original_accel: float
     original_brake: float
     owned_accel: float | None = None
     owned_brake: float | None = None
 
 
-_patches: dict[str, _MovementPatch] = {}
+_patches: dict[int, _MovementPatch] = {}
 
 
 def _error(message: str) -> None:
@@ -100,17 +100,9 @@ def _path(obj: Any) -> str:
         return "<unreadable-path>"
 
 
-def _component_key(obj: UObject) -> str | None:
+def _component_key(obj: UObject) -> int | None:
     try:
-        path = str(obj._path_name())
-    except Exception:
-        path = ""
-
-    if path:
-        return path
-
-    try:
-        return f"0x{int(obj._get_address()):x}"
+        return int(obj._get_address())
     except Exception:
         return None
 
@@ -191,6 +183,36 @@ def _get_current_pawn() -> UObject | None:
         return controller.Pawn
     except Exception:
         return None
+
+
+def _iter_local_move_components():
+    try:
+        controllers = unrealsdk.find_all("PlayerController", exact=False)
+    except Exception:
+        return
+
+    seen: set[int] = set()
+    for controller in controllers:
+        try:
+            if not bool(controller.IsLocalController()):
+                continue
+            pawn = controller.Pawn
+        except Exception:
+            continue
+
+        if pawn is None:
+            continue
+
+        component = _get_move_component(pawn)
+        if component is None:
+            continue
+
+        key = _component_key(component)
+        if key is None or key in seen:
+            continue
+
+        seen.add(key)
+        yield component
 
 
 def _get_move_component(pawn: UObject) -> UObject | None:
@@ -311,42 +333,44 @@ def _apply_current_values() -> None:
 
 
 def _restore_all() -> None:
-    component = _get_move_component(_get_current_pawn())
-    if component is not None:
+    for component in _iter_local_move_components():
         key = _component_key(component)
-        patch = _patches.get(key) if key is not None else None
+        if key is None:
+            continue
 
-        if patch is not None:
-            if patch.owned_accel is not None:
+        patch = _patches.get(key)
+        if patch is None:
+            continue
+
+        if patch.owned_accel is not None:
+            try:
+                current_accel = float(component.MaxAcceleration)
+            except Exception:
+                current_accel = None
+            if (
+                current_accel is not None
+                and _same_value(current_accel, patch.owned_accel)
+            ):
                 try:
-                    current_accel = float(component.MaxAcceleration)
+                    component.MaxAcceleration = patch.original_accel
                 except Exception:
-                    current_accel = None
-                if (
-                    current_accel is not None
-                    and _same_value(current_accel, patch.owned_accel)
-                ):
-                    try:
-                        component.MaxAcceleration = patch.original_accel
-                    except Exception:
-                        pass
+                    pass
 
-            if patch.owned_brake is not None:
+        if patch.owned_brake is not None:
+            try:
+                current_brake = float(component.BrakingDecelerationWalking)
+            except Exception:
+                current_brake = None
+            if (
+                current_brake is not None
+                and _same_value(current_brake, patch.owned_brake)
+            ):
                 try:
-                    current_brake = float(component.BrakingDecelerationWalking)
+                    component.BrakingDecelerationWalking = patch.original_brake
                 except Exception:
-                    current_brake = None
-                if (
-                    current_brake is not None
-                    and _same_value(current_brake, patch.owned_brake)
-                ):
-                    try:
-                        component.BrakingDecelerationWalking = patch.original_brake
-                    except Exception:
-                        pass
+                    pass
 
-    # Records contain scalar state only. Dropping historical pawn records never
-    # dereferences old-world UObjects.
+    # Ownership records are scalar-only; stale world objects are never retained.
     _patches.clear()
 
 
