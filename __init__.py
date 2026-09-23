@@ -100,7 +100,7 @@ def _path(obj: Any) -> str:
         return "<unreadable-path>"
 
 
-def _component_key(obj: UObject) -> str:
+def _component_key(obj: UObject) -> str | None:
     try:
         path = str(obj._path_name())
     except Exception:
@@ -112,7 +112,7 @@ def _component_key(obj: UObject) -> str:
     try:
         return f"0x{int(obj._get_address()):x}"
     except Exception:
-        return "<unreadable-component>"
+        return None
 
 
 def _safe_value(
@@ -244,6 +244,11 @@ def _apply_to_pawn(
         return
 
     key = _component_key(component)
+    if key is None:
+        if report_failure:
+            _error(f"could not identify movement component on {_path(pawn)}")
+        return
+
     patch = _patches.get(key)
 
     if patch is None:
@@ -309,7 +314,7 @@ def _restore_all() -> None:
     component = _get_move_component(_get_current_pawn())
     if component is not None:
         key = _component_key(component)
-        patch = _patches.get(key)
+        patch = _patches.get(key) if key is not None else None
 
         if patch is not None:
             if patch.owned_accel is not None:
