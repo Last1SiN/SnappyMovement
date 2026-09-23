@@ -77,14 +77,14 @@ _syncing_options = False
 
 @dataclass(slots=True)
 class _MovementPatch:
-    component_key: int
+    component_key: str
     original_accel: float
     original_brake: float
     owned_accel: float | None = None
     owned_brake: float | None = None
 
 
-_patches: dict[int, _MovementPatch] = {}
+_patches: dict[str, _MovementPatch] = {}
 
 
 def _error(message: str) -> None:
@@ -100,11 +100,19 @@ def _path(obj: Any) -> str:
         return "<unreadable-path>"
 
 
-def _object_key(obj: UObject) -> int:
+def _component_key(obj: UObject) -> str:
     try:
-        return int(obj._get_address())
+        path = str(obj._path_name())
     except Exception:
-        return id(obj)
+        path = ""
+
+    if path:
+        return path
+
+    try:
+        return f"0x{int(obj._get_address()):x}"
+    except Exception:
+        return "<unreadable-component>"
 
 
 def _safe_value(
@@ -235,7 +243,7 @@ def _apply_to_pawn(
             _error(f"could not locate movement component on {_path(pawn)}")
         return
 
-    key = _object_key(component)
+    key = _component_key(component)
     patch = _patches.get(key)
 
     if patch is None:
@@ -300,7 +308,7 @@ def _apply_current_values() -> None:
 def _restore_all() -> None:
     component = _get_move_component(_get_current_pawn())
     if component is not None:
-        key = _object_key(component)
+        key = _component_key(component)
         patch = _patches.get(key)
 
         if patch is not None:
