@@ -292,6 +292,11 @@ def _apply_to_pawn(
             )
 
 
+def _apply_current_values() -> None:
+    acceleration, braking = _current_values()
+    _apply_to_pawn(_get_current_pawn(), acceleration, braking)
+
+
 def _restore_all() -> None:
     component = _get_move_component(_get_current_pawn())
     if component is not None:
