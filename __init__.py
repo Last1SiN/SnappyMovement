@@ -4,7 +4,7 @@ import math
 from typing import Any
 
 import unrealsdk
-from mods_base import MODS_DIR, Game, Mod, SliderOption, SpinnerOption, build_mod, hook
+from mods_base import MODS_DIR, Game, Mod, SliderOption, SpinnerOption, build_mod, get_pc, hook
 from unrealsdk import logging
 from unrealsdk.hooks import Type
 from unrealsdk.unreal import BoundFunction, UObject, WrappedStruct
@@ -74,7 +74,7 @@ OPTIONS = (profile_option, accel_option, brake_option)
 _syncing_options = False
 _patched_components: list[tuple[UObject, float, float]] = []
 
-DIAG_VERSION = "1.0-diag1"
+DIAG_VERSION = "1.0.2"
 DIAG_LOG = MODS_DIR / "SnappyMovement_diag.log"
 _diag_counter = 0
 
@@ -197,16 +197,39 @@ def _current_values(profile: str | None = None) -> tuple[float, float]:
 
 def _find_local_controller() -> UObject | None:
     try:
-        controllers = unrealsdk.find_all("PlayerController", exact=False)
-    except Exception:
+        controller = get_pc(possibly_loading=True)
+    except Exception as exc:
+        controller = None
+        _diag("GET_PC_ERROR", extra=repr(exc))
+
+    if controller is not None:
+        try:
+            is_local = bool(controller.IsLocalController())
+        except Exception as exc:
+            is_local = False
+            _diag("GET_PC_LOCAL_ERROR", controller, repr(exc))
+
+        _diag("GET_PC_RESULT", controller, f"is_local={is_local}")
+        if is_local:
+            return controller
+
+    try:
+        controllers = list(unrealsdk.find_all("PlayerController", exact=False))
+    except Exception as exc:
+        _diag("FIND_ALL_CONTROLLER_ERROR", extra=repr(exc))
         return None
 
-    for controller in controllers:
+    _diag("FIND_ALL_CONTROLLER_COUNT", extra=f"count={len(controllers)}")
+    for index, candidate in enumerate(controllers):
         try:
-            if bool(controller.IsLocalController()):
-                return controller
-        except Exception:
+            is_local = bool(candidate.IsLocalController())
+        except Exception as exc:
+            _diag("CONTROLLER_LOCAL_ERROR", candidate, f"index={index} error={exc!r}")
             continue
+
+        _diag("CONTROLLER_CANDIDATE", candidate, f"index={index} is_local={is_local}")
+        if is_local:
+            return candidate
 
     return None
 
@@ -253,9 +276,27 @@ def _get_move_component(pawn: UObject) -> UObject | None:
 
 
 def _diag_current(event: str, extra: str = "") -> None:
-    pawn = _get_current_pawn()
-    component = _get_move_component(pawn) if pawn is not None else None
-    _diag(event, component, extra)
+    controller = _find_local_controller()
+    if controller is None:
+        _diag(event, extra=(extra + " stage=no_controller").strip())
+        return
+
+    try:
+        pawn = controller.Pawn
+    except Exception as exc:
+        _diag(event, controller, (extra + f" stage=pawn_error error={exc!r}").strip())
+        return
+
+    if pawn is None:
+        _diag(event, controller, (extra + " stage=no_pawn").strip())
+        return
+
+    component = _get_move_component(pawn)
+    if component is None:
+        _diag(event, pawn, (extra + " stage=no_component").strip())
+        return
+
+    _diag(event, component, (extra + " stage=ok").strip())
 
 
 def _remember_original(component: UObject) -> None:
