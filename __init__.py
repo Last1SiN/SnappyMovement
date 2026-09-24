@@ -4,7 +4,7 @@ import math
 from typing import Any
 
 import unrealsdk
-from mods_base import Game, Mod, SliderOption, SpinnerOption, build_mod, hook
+from mods_base import MODS_DIR, Game, Mod, SliderOption, SpinnerOption, build_mod, hook
 from unrealsdk import logging
 from unrealsdk.hooks import Type
 from unrealsdk.unreal import BoundFunction, UObject, WrappedStruct
@@ -74,6 +74,18 @@ OPTIONS = (profile_option, accel_option, brake_option)
 _syncing_options = False
 _patched_components: list[tuple[UObject, float, float]] = []
 
+DIAG_VERSION = "1.0-diag1"
+DIAG_LOG = MODS_DIR / "SnappyMovement_diag.log"
+_diag_counter = 0
+
+try:
+    DIAG_LOG.write_text(
+        f"SnappyMovement DIAG {DIAG_VERSION}\n",
+        encoding="utf-8",
+    )
+except Exception:
+    pass
+
 
 def _error(message: str) -> None:
     logging.error(f"[SnappyMovement] {message}")
@@ -86,6 +98,50 @@ def _path(obj: Any) -> str:
         return str(obj._path_name())
     except Exception:
         return "<unreadable-path>"
+
+
+def _diag_component_text(component: UObject | None) -> str:
+    if component is None:
+        return "component=None"
+
+    try:
+        py_id = hex(id(component))
+    except Exception:
+        py_id = "<id-error>"
+
+    try:
+        address = hex(int(component._get_address()))
+    except Exception:
+        address = "<addr-error>"
+
+    try:
+        accel = f"{float(component.MaxAcceleration):.6f}"
+    except Exception:
+        accel = "<read-error>"
+
+    try:
+        brake = f"{float(component.BrakingDecelerationWalking):.6f}"
+    except Exception:
+        brake = "<read-error>"
+
+    return (
+        f"pyid={py_id} addr={address} path={_path(component)!r} "
+        f"accel={accel} brake={brake}"
+    )
+
+
+def _diag(event: str, component: UObject | None = None, extra: str = "") -> None:
+    global _diag_counter
+
+    _diag_counter += 1
+    suffix = f" {extra}" if extra else ""
+    line = f"[{_diag_counter:04d}] {event} {_diag_component_text(component)}{suffix}\n"
+
+    try:
+        with DIAG_LOG.open("a", encoding="utf-8", errors="replace") as handle:
+            handle.write(line)
+    except Exception:
+        pass
 
 
 def _safe_value(
@@ -196,19 +252,46 @@ def _get_move_component(pawn: UObject) -> UObject | None:
     return None
 
 
+def _diag_current(event: str, extra: str = "") -> None:
+    pawn = _get_current_pawn()
+    component = _get_move_component(pawn) if pawn is not None else None
+    _diag(event, component, extra)
+
+
 def _remember_original(component: UObject) -> None:
-    for existing, _old_accel, _old_brake in _patched_components:
-        if existing is component:
+    _diag("REMEMBER_ENTER", component, f"records={len(_patched_components)}")
+
+    for index, (existing, _old_accel, _old_brake) in enumerate(_patched_components):
+        same_wrapper = existing is component
+        _diag(
+            "REMEMBER_COMPARE",
+            existing,
+            (
+                f"index={index} same_wrapper={same_wrapper} "
+                f"candidate_pyid={hex(id(component))}"
+            ),
+        )
+        if same_wrapper:
+            _diag("REMEMBER_HIT", component, f"index={index}")
             return
 
     try:
         old_accel = float(component.MaxAcceleration)
         old_brake = float(component.BrakingDecelerationWalking)
     except Exception as exc:
+        _diag("REMEMBER_READ_ERROR", component, repr(exc))
         _error(f"could not read original movement values from {_path(component)}: {exc}")
         return
 
     _patched_components.append((component, old_accel, old_brake))
+    _diag(
+        "REMEMBER_APPEND",
+        component,
+        (
+            f"stored_accel={old_accel:.6f} stored_brake={old_brake:.6f} "
+            f"records={len(_patched_components)}"
+        ),
+    )
 
 
 def _apply_to_pawn(
@@ -227,12 +310,23 @@ def _apply_to_pawn(
             _error(f"could not locate movement component on {_path(pawn)}")
         return
 
+    _diag(
+        "APPLY_BEFORE",
+        component,
+        f"target_accel={acceleration:.6f} target_brake={braking:.6f}",
+    )
     _remember_original(component)
 
     try:
         component.MaxAcceleration = acceleration
         component.BrakingDecelerationWalking = braking
+        _diag(
+            "APPLY_AFTER",
+            component,
+            f"target_accel={acceleration:.6f} target_brake={braking:.6f}",
+        )
     except Exception as exc:
+        _diag("APPLY_WRITE_ERROR", component, repr(exc))
         _error(f"failed to apply movement values to {_path(component)}: {exc}")
 
 
@@ -244,23 +338,47 @@ def _apply_current_values() -> None:
 def _restore_all() -> None:
     global _patched_components
 
-    for component, old_accel, old_brake in _patched_components:
+    _diag("RESTORE_BEGIN", extra=f"records={len(_patched_components)}")
+
+    for index, (component, old_accel, old_brake) in enumerate(_patched_components):
+        _diag(
+            "RESTORE_BEFORE",
+            component,
+            (
+                f"index={index} stored_accel={old_accel:.6f} "
+                f"stored_brake={old_brake:.6f}"
+            ),
+        )
         try:
             component.MaxAcceleration = old_accel
             component.BrakingDecelerationWalking = old_brake
-        except Exception:
+            _diag(
+                "RESTORE_AFTER",
+                component,
+                (
+                    f"index={index} stored_accel={old_accel:.6f} "
+                    f"stored_brake={old_brake:.6f}"
+                ),
+            )
+        except Exception as exc:
+            _diag("RESTORE_WRITE_ERROR", component, f"index={index} error={exc!r}")
             # Destroyed pawns/components from map changes or respawns can remain as stale wrappers.
             pass
 
     _patched_components = []
+    _diag("RESTORE_END", extra="records=0")
 
 
 def _on_enable() -> None:
+    _diag_current("ENABLE_BEFORE")
     _apply_current_values()
+    _diag_current("ENABLE_AFTER")
 
 
 def _on_disable() -> None:
+    _diag_current("DISABLE_BEFORE")
     _restore_all()
+    _diag_current("DISABLE_AFTER")
 
 
 @hook("/Script/Engine.PlayerController:ClientRestart", Type.POST)
@@ -284,12 +402,20 @@ def _client_restart(
         except Exception:
             pawn = None
 
+    component = _get_move_component(pawn) if pawn is not None else None
+    _diag("CLIENT_RESTART_BEFORE", component)
+
     acceleration, braking = _current_values()
     _apply_to_pawn(pawn, acceleration, braking, report_failure=True)
+
+    component = _get_move_component(pawn) if pawn is not None else None
+    _diag("CLIENT_RESTART_AFTER", component)
 
 
 def _on_profile_change(_option: SpinnerOption, new_value: str) -> None:
     global _syncing_options
+
+    _diag_current("PROFILE_CHANGE", f"new_value={new_value!r}")
 
     if _syncing_options:
         return
@@ -312,6 +438,8 @@ def _on_profile_change(_option: SpinnerOption, new_value: str) -> None:
 
 def _on_accel_change(_option: SliderOption, new_value: float) -> None:
     global _syncing_options
+
+    _diag_current("ACCEL_CHANGE", f"new_value={new_value!r}")
 
     if _syncing_options:
         return
@@ -343,6 +471,8 @@ def _on_accel_change(_option: SliderOption, new_value: float) -> None:
 
 def _on_brake_change(_option: SliderOption, new_value: float) -> None:
     global _syncing_options
+
+    _diag_current("BRAKE_CHANGE", f"new_value={new_value!r}")
 
     if _syncing_options:
         return
@@ -443,3 +573,6 @@ accel_option.set_on_change(_on_accel_change, anytime=True, while_enabled=False)
 brake_option.set_on_change(_on_brake_change, anytime=True, while_enabled=False)
 
 _sanitize_loaded_settings(mod)
+
+
+_diag_current("MODULE_READY", f"records={len(_patched_components)}")
