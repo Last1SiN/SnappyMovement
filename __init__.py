@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
 from typing import Any
 
 import unrealsdk
@@ -73,18 +72,7 @@ brake_option = SliderOption(
 OPTIONS = (profile_option, accel_option, brake_option)
 
 _syncing_options = False
-
-
-@dataclass(slots=True)
-class _MovementPatch:
-    component_key: int
-    original_accel: float
-    original_brake: float
-    owned_accel: float | None = None
-    owned_brake: float | None = None
-
-
-_patches: dict[int, _MovementPatch] = {}
+_patched_components: list[tuple[UObject, float, float]] = []
 
 
 def _error(message: str) -> None:
@@ -98,13 +86,6 @@ def _path(obj: Any) -> str:
         return str(obj._path_name())
     except Exception:
         return "<unreadable-path>"
-
-
-def _component_key(obj: UObject) -> int | None:
-    try:
-        return int(obj._get_address())
-    except Exception:
-        return None
 
 
 def _safe_value(
@@ -185,36 +166,6 @@ def _get_current_pawn() -> UObject | None:
         return None
 
 
-def _iter_local_move_components():
-    try:
-        controllers = unrealsdk.find_all("PlayerController", exact=False)
-    except Exception:
-        return
-
-    seen: set[int] = set()
-    for controller in controllers:
-        try:
-            if not bool(controller.IsLocalController()):
-                continue
-            pawn = controller.Pawn
-        except Exception:
-            continue
-
-        if pawn is None:
-            continue
-
-        component = _get_move_component(pawn)
-        if component is None:
-            continue
-
-        key = _component_key(component)
-        if key is None or key in seen:
-            continue
-
-        seen.add(key)
-        yield component
-
-
 def _get_move_component(pawn: UObject) -> UObject | None:
     for attr in ("CharMoveComp", "CharacterMovement", "CharacterMovementComponent"):
         try:
@@ -245,8 +196,19 @@ def _get_move_component(pawn: UObject) -> UObject | None:
     return None
 
 
-def _same_value(current: float, owned: float) -> bool:
-    return math.isclose(current, owned, rel_tol=1e-6, abs_tol=1e-6)
+def _remember_original(component: UObject) -> None:
+    for existing, _old_accel, _old_brake in _patched_components:
+        if existing is component:
+            return
+
+    try:
+        old_accel = float(component.MaxAcceleration)
+        old_brake = float(component.BrakingDecelerationWalking)
+    except Exception as exc:
+        _error(f"could not read original movement values from {_path(component)}: {exc}")
+        return
+
+    _patched_components.append((component, old_accel, old_brake))
 
 
 def _apply_to_pawn(
@@ -265,66 +227,13 @@ def _apply_to_pawn(
             _error(f"could not locate movement component on {_path(pawn)}")
         return
 
-    key = _component_key(component)
-    if key is None:
-        if report_failure:
-            _error(f"could not identify movement component on {_path(pawn)}")
-        return
-
-    patch = _patches.get(key)
-
-    if patch is None:
-        try:
-            old_accel = float(component.MaxAcceleration)
-            old_brake = float(component.BrakingDecelerationWalking)
-        except Exception as exc:
-            _error(f"could not read original movement values from {_path(component)}: {exc}")
-            return
-
-        patch = _MovementPatch(
-            component_key=key,
-            original_accel=old_accel,
-            original_brake=old_brake,
-        )
-        _patches[key] = patch
+    _remember_original(component)
 
     try:
-        current_accel = float(component.MaxAcceleration)
-    except Exception:
-        current_accel = None
-
-    if (
-        current_accel is not None
-        and (
-            patch.owned_accel is None
-            or _same_value(current_accel, patch.owned_accel)
-        )
-    ):
-        try:
-            component.MaxAcceleration = acceleration
-            patch.owned_accel = acceleration
-        except Exception as exc:
-            _error(f"failed to apply MaxAcceleration to {_path(component)}: {exc}")
-
-    try:
-        current_brake = float(component.BrakingDecelerationWalking)
-    except Exception:
-        current_brake = None
-
-    if (
-        current_brake is not None
-        and (
-            patch.owned_brake is None
-            or _same_value(current_brake, patch.owned_brake)
-        )
-    ):
-        try:
-            component.BrakingDecelerationWalking = braking
-            patch.owned_brake = braking
-        except Exception as exc:
-            _error(
-                f"failed to apply BrakingDecelerationWalking to {_path(component)}: {exc}"
-            )
+        component.MaxAcceleration = acceleration
+        component.BrakingDecelerationWalking = braking
+    except Exception as exc:
+        _error(f"failed to apply movement values to {_path(component)}: {exc}")
 
 
 def _apply_current_values() -> None:
@@ -333,45 +242,17 @@ def _apply_current_values() -> None:
 
 
 def _restore_all() -> None:
-    for component in _iter_local_move_components():
-        key = _component_key(component)
-        if key is None:
-            continue
+    global _patched_components
 
-        patch = _patches.get(key)
-        if patch is None:
-            continue
+    for component, old_accel, old_brake in _patched_components:
+        try:
+            component.MaxAcceleration = old_accel
+            component.BrakingDecelerationWalking = old_brake
+        except Exception:
+            # Destroyed pawns/components from map changes or respawns can remain as stale wrappers.
+            pass
 
-        if patch.owned_accel is not None:
-            try:
-                current_accel = float(component.MaxAcceleration)
-            except Exception:
-                current_accel = None
-            if (
-                current_accel is not None
-                and _same_value(current_accel, patch.owned_accel)
-            ):
-                try:
-                    component.MaxAcceleration = patch.original_accel
-                except Exception:
-                    pass
-
-        if patch.owned_brake is not None:
-            try:
-                current_brake = float(component.BrakingDecelerationWalking)
-            except Exception:
-                current_brake = None
-            if (
-                current_brake is not None
-                and _same_value(current_brake, patch.owned_brake)
-            ):
-                try:
-                    component.BrakingDecelerationWalking = patch.original_brake
-                except Exception:
-                    pass
-
-    # Ownership records are scalar-only; stale world objects are never retained.
-    _patches.clear()
+    _patched_components = []
 
 
 def _on_enable() -> None:
