@@ -2,21 +2,22 @@
 
 [English](README.md) | [Русский](README_RU.md)
 
-SnappyMovement makes Borderlands 3 ground movement more responsive and closer to Borderlands 2 by reducing acceleration ramp-up time and stopping inertia without increasing the game's normal maximum movement speed.
+SnappyMovement makes Borderlands 3 movement feel less floaty and more immediate.
 
-The mod changes only the local player's `MaxAcceleration` and `BrakingDecelerationWalking`. It does not intentionally change `MaxWalkSpeed`, `MaxSprintSpeed`, `GroundFriction`, jump settings, air control or slide speed.
+You get up to speed faster, stop faster when you let go of movement, and keep the game's normal top walking and sprinting speeds. It is meant to change how movement responds, not make your character run faster.
+
+Three presets are included, plus a Custom mode if you want to tune it yourself.
 
 ## Features
 
-- Reduces the sluggish feeling when starting ground movement.
-- Reduces stopping inertia after movement input is released.
-- Keeps the game's normal maximum walk and sprint speeds unchanged.
-- Does not modify `GroundFriction`.
-- Includes three presets plus manual control.
-- Applies option changes immediately while enabled.
-- Reapplies the selected settings to a new local-player pawn after respawn or map transitions.
-- Restores the movement values captured before SnappyMovement changed them when the mod is disabled.
-- Normal gameplay logging is limited to errors.
+- Faster response when you start moving.
+- Less sliding after you release movement input.
+- Does not increase normal walk or sprint top speed.
+- Three ready-made profiles: Soft, Near Instant and Instant.
+- Custom mode with separate acceleration and braking sliders.
+- Changes apply immediately while the mod is enabled.
+- Settings are reapplied after respawn and map changes.
+- Original movement values are restored when the mod is disabled.
 
 ## Profiles
 
