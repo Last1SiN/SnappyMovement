@@ -66,8 +66,7 @@ Use the [official BL3 SDK / Oak installation guide](https://bl-sdk.github.io/oak
 1. Install or update BL3 PythonSDK / Oak using the official guide above.
 2. Download `SnappyMovement.sdkmod` from [GitHub Releases](https://github.com/Last1SiN/SnappyMovement/releases/latest).
 3. With Borderlands 3 closed, copy the `.sdkmod` file intact to `Borderlands 3\sdk_mods\`. Do not extract the `.sdkmod` itself.
-4. Remove old `No_Movement_Inertia_*.bl3hotfix` builds if present so they cannot modify the same movement properties at the same time.
-5. Start the game, open **MODS -> SnappyMovement**, enable the mod and choose a profile or tune the sliders under **Options**.
+4. Start the game, open **MODS -> SnappyMovement**, enable the mod and choose a profile or tune the sliders under **Options**.
 
 To update SnappyMovement, replace the existing `.sdkmod` with the newer file and restart the game.
 
