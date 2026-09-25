@@ -66,8 +66,7 @@ SnappyMovement делает движение в Borderlands 3 менее ват�
 1. Установите или обновите BL3 PythonSDK / Oak по официальной инструкции выше.
 2. Скачайте `SnappyMovement.sdkmod` из [GitHub Releases](https://github.com/Last1SiN/SnappyMovement/releases/latest).
 3. При полностью закрытой Borderlands 3 скопируйте `.sdkmod` целиком в `Borderlands 3\sdk_mods\`. Сам `.sdkmod` распаковывать не нужно.
-4. Удалите старые `No_Movement_Inertia_*.bl3hotfix`, если они остались, чтобы они не меняли те же movement properties одновременно.
-5. Запустите игру, откройте **MODS -> SnappyMovement**, включите мод и выберите профиль или настройте слайдеры через **Options**.
+4. Запустите игру, откройте **MODS -> SnappyMovement**, включите мод и выберите профиль или настройте слайдеры через **Options**.
 
 Для обновления замените существующий `.sdkmod` новым файлом и перезапустите игру.
 
