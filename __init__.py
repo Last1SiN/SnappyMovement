@@ -4,7 +4,7 @@ import math
 from typing import Any
 
 import unrealsdk
-from mods_base import Game, Mod, SliderOption, SpinnerOption, build_mod, hook
+from mods_base import BoolOption, Game, Mod, SliderOption, SpinnerOption, build_mod, hook
 from unrealsdk import logging
 from unrealsdk.hooks import Type
 from unrealsdk.unreal import BoundFunction, UObject, WrappedStruct
@@ -69,10 +69,41 @@ brake_option = SliderOption(
     ),
 )
 
-OPTIONS = (profile_option, accel_option, brake_option)
+remember_sprint_option = BoolOption(
+    identifier="remember_sprint",
+    value=False,
+    display_name="Remember Sprint",
+    description=(
+        "Remembers sprint intent through jumps and slide-jumps, then lets the game "
+        "resume sprint after landing without another sprint press."
+    ),
+)
+
+slide_from_landing_option = BoolOption(
+    identifier="slide_from_landing",
+    value=False,
+    display_name="Slide from Landing",
+    description=(
+        "If crouch is still held as you land, asks the game to start its native slide "
+        "instead of requiring another crouch press."
+    ),
+)
+
+OPTIONS = (
+    profile_option,
+    accel_option,
+    brake_option,
+    remember_sprint_option,
+    slide_from_landing_option,
+)
 
 _syncing_options = False
 _patched_components: list[tuple[UObject, float, float]] = []
+
+_sprint_chain_armed = False
+_resume_sprint_after_landing = False
+_restoring_sprint = False
+_landing_crouch_pending = False
 
 
 def _error(message: str) -> None:
@@ -255,12 +286,280 @@ def _restore_all() -> None:
     _patched_components = []
 
 
+
+def _movement_bool(obj: UObject | None, method_name: str) -> bool:
+    if obj is None:
+        return False
+    try:
+        method = getattr(obj, method_name)
+    except Exception:
+        return False
+    if not callable(method):
+        return False
+    try:
+        return bool(method())
+    except Exception:
+        return False
+
+
+def _movement_flag(component: UObject | None, name: str) -> bool:
+    if component is None:
+        return False
+    try:
+        return bool(getattr(component, name))
+    except Exception:
+        return False
+
+
+def _is_falling(pawn: UObject | None) -> bool:
+    if pawn is None:
+        return False
+    component = _get_move_component(pawn)
+    if component is None:
+        return False
+    try:
+        return bool(component.IsFalling())
+    except Exception:
+        return False
+
+
+def _is_sliding(pawn: UObject | None) -> bool:
+    return _movement_bool(pawn, "IsCharacterSliding")
+
+
+def _wants_sprint(pawn: UObject | None) -> bool:
+    if pawn is None:
+        return False
+    if _movement_bool(pawn, "GetWantsToSprint"):
+        return True
+    return _movement_flag(_get_move_component(pawn), "bWantsToSprint")
+
+
+def _wants_crouch(pawn: UObject | None) -> bool:
+    return _movement_bool(pawn, "GetWantsToCrouch")
+
+
+def _reset_flow_state() -> None:
+    global _sprint_chain_armed
+    global _resume_sprint_after_landing
+    global _restoring_sprint
+    global _landing_crouch_pending
+
+    _sprint_chain_armed = False
+    _resume_sprint_after_landing = False
+    _restoring_sprint = False
+    _landing_crouch_pending = False
+
+
+def _restore_remembered_sprint(pawn: UObject | None, reason: str) -> bool:
+    global _resume_sprint_after_landing
+    global _restoring_sprint
+    global _sprint_chain_armed
+
+    if pawn is None or not bool(remember_sprint_option.value):
+        _resume_sprint_after_landing = False
+        return False
+
+    if not _resume_sprint_after_landing:
+        return False
+
+    if _wants_sprint(pawn):
+        _resume_sprint_after_landing = False
+        _sprint_chain_armed = True
+        return False
+
+    try:
+        _restoring_sprint = True
+        pawn.SetWantsToSprint(True)
+    except Exception as exc:
+        _error(f"Remember Sprint: failed to restore sprint after {reason}: {exc}")
+        return False
+    finally:
+        _restoring_sprint = False
+
+    _resume_sprint_after_landing = False
+    _sprint_chain_armed = True
+    logging.info(f"[SnappyMovement test] Remember Sprint restored after {reason}")
+    return True
+
+
 def _on_enable() -> None:
+    _reset_flow_state()
     _apply_current_values()
 
 
 def _on_disable() -> None:
+    _reset_flow_state()
     _restore_all()
+
+
+@hook("/Script/OakGame.OakCharacter:SetWantsToSprint", Type.POST)
+def _set_wants_to_sprint(
+    obj: UObject,
+    args: WrappedStruct,
+    _ret: Any,
+    _func: BoundFunction,
+) -> None:
+    global _sprint_chain_armed
+    global _resume_sprint_after_landing
+
+    if _restoring_sprint or obj is not _get_current_pawn():
+        return
+
+    try:
+        requested = bool(args.bNewWantsToSprint)
+    except Exception:
+        return
+
+    if requested:
+        return
+
+    _sprint_chain_armed = False
+    _resume_sprint_after_landing = False
+
+
+@hook("/Script/OakGame.OakCharacter:OnStartSprinting", Type.POST)
+def _on_start_sprinting(
+    obj: UObject,
+    _args: WrappedStruct,
+    _ret: Any,
+    _func: BoundFunction,
+) -> None:
+    global _sprint_chain_armed
+
+    if obj is not _get_current_pawn():
+        return
+
+    if bool(remember_sprint_option.value):
+        _sprint_chain_armed = True
+
+
+@hook("/Script/OakGame.OakCharacter:OnEndSprinting", Type.POST)
+def _on_end_sprinting(
+    obj: UObject,
+    _args: WrappedStruct,
+    _ret: Any,
+    _func: BoundFunction,
+) -> None:
+    global _sprint_chain_armed
+
+    if obj is not _get_current_pawn() or not bool(remember_sprint_option.value):
+        return
+
+    if _is_falling(obj) or _is_sliding(obj):
+        return
+
+    if not _wants_sprint(obj):
+        _sprint_chain_armed = False
+
+
+@hook(
+    "/Game/PlayerCharacters/_Shared/_Design/Character/BPChar_Player.BPChar_Player_C:OnJumped",
+    Type.POST,
+)
+def _on_jumped(
+    obj: UObject,
+    _args: WrappedStruct,
+    _ret: Any,
+    _func: BoundFunction,
+) -> None:
+    global _resume_sprint_after_landing
+    global _landing_crouch_pending
+
+    if obj is not _get_current_pawn():
+        return
+
+    _landing_crouch_pending = False
+
+    if not bool(remember_sprint_option.value):
+        _resume_sprint_after_landing = False
+        return
+
+    component = _get_move_component(obj)
+    sprint_related = (
+        _sprint_chain_armed
+        or _wants_sprint(obj)
+        or _movement_flag(component, "bIsSprinting")
+    )
+    _resume_sprint_after_landing = bool(sprint_related)
+
+    if _resume_sprint_after_landing:
+        logging.info("[SnappyMovement test] Remember Sprint armed for landing")
+
+
+@hook(
+    "/Game/PlayerCharacters/_Shared/_Design/Character/BPChar_Player.BPChar_Player_C:OnLanded",
+    Type.PRE,
+)
+def _on_landed_pre(
+    obj: UObject,
+    _args: WrappedStruct,
+    _ret: Any,
+    _func: BoundFunction,
+) -> None:
+    global _landing_crouch_pending
+
+    if obj is not _get_current_pawn() or not bool(slide_from_landing_option.value):
+        _landing_crouch_pending = False
+        return
+
+    _landing_crouch_pending = _wants_crouch(obj)
+    if _landing_crouch_pending:
+        logging.info("[SnappyMovement test] Slide from Landing captured held crouch")
+
+
+@hook(
+    "/Game/PlayerCharacters/_Shared/_Design/Character/BPChar_Player.BPChar_Player_C:OnLanded",
+    Type.POST,
+)
+def _on_landed_post(
+    obj: UObject,
+    _args: WrappedStruct,
+    _ret: Any,
+    _func: BoundFunction,
+) -> None:
+    global _landing_crouch_pending
+
+    if obj is not _get_current_pawn():
+        return
+
+    slide_requested = False
+    if bool(slide_from_landing_option.value) and _landing_crouch_pending:
+        try:
+            obj.SetWantsToSlide(True)
+            slide_requested = True
+            logging.info("[SnappyMovement test] Slide from Landing requested native slide")
+        except Exception as exc:
+            _error(f"Slide from Landing: failed to request native slide: {exc}")
+
+    _landing_crouch_pending = False
+
+    # A landing slide has priority. Keep remembered sprint armed so a slide-jump
+    # can carry it into its next landing, or a later native slide release can resume it.
+    if not slide_requested:
+        _restore_remembered_sprint(obj, "landing")
+
+
+@hook("/Script/OakGame.OakCharacter:SetWantsToSlide", Type.POST)
+def _set_wants_to_slide(
+    obj: UObject,
+    args: WrappedStruct,
+    _ret: Any,
+    _func: BoundFunction,
+) -> None:
+    if obj is not _get_current_pawn():
+        return
+
+    try:
+        requested = bool(args.bNewWantsToSlide)
+    except Exception:
+        return
+
+    if requested:
+        return
+
+    if _resume_sprint_after_landing and not _is_falling(obj) and not _is_sliding(obj):
+        _restore_remembered_sprint(obj, "slide")
 
 
 @hook("/Script/Engine.PlayerController:ClientRestart", Type.POST)
@@ -284,6 +583,7 @@ def _client_restart(
         except Exception:
             pawn = None
 
+    _reset_flow_state()
     acceleration, braking = _current_values()
     _apply_to_pawn(pawn, acceleration, braking, report_failure=True)
 
