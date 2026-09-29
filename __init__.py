@@ -6,7 +6,7 @@ from typing import Any
 import unrealsdk
 from mods_base import BoolOption, Game, Mod, SliderOption, SpinnerOption, build_mod, get_pc, hook
 from unrealsdk import logging
-from unrealsdk.hooks import Type
+from unrealsdk.hooks import Type, add_hook, remove_hook
 from unrealsdk.unreal import BoundFunction, UObject, WrappedStruct
 
 assert Game.get_current() is Game.BL3, "SnappyMovement supports Borderlands 3 only"
@@ -106,6 +106,18 @@ _restoring_sprint = False
 _landing_crouch_pending = False
 _landing_transition_pending = False
 _air_slide_intent = False
+
+_CROUCH_INPUT_FN_5 = (
+    "GbxInpActEvt_InputAction_Discrete_Crouch_"
+    "K2Node_GbxInputActionEvent_Discrete_5"
+)
+_CROUCH_INPUT_FN_6 = (
+    "GbxInpActEvt_InputAction_Discrete_Crouch_"
+    "K2Node_GbxInputActionEvent_Discrete_6"
+)
+_CROUCH_FLUSH_FN = "FlushCrouchInput"
+_CROUCH_DYNAMIC_ID_PREFIX = "snappymovement:crouch-input-diag:v1.1.5"
+_crouch_dynamic_hooks: list[tuple[str, str]] = []
 
 
 def _error(message: str) -> None:
@@ -368,6 +380,158 @@ def _wants_crouch(pawn: UObject | None) -> bool:
     return _movement_bool(pawn, "GetWantsToCrouch")
 
 
+
+def _bound_function_path(func: BoundFunction) -> str:
+    try:
+        return str(func.func._path_name())
+    except Exception:
+        try:
+            return str(func._path_name())
+        except Exception:
+            return "<unreadable-function>"
+
+
+def _crouch_probe_callback(
+    obj: UObject,
+    args: WrappedStruct,
+    _ret: Any,
+    func: BoundFunction,
+) -> None:
+    pawn = _get_current_pawn()
+    movement = _get_move_component(pawn) if pawn is not None else None
+
+    try:
+        action = args.Action
+    except Exception:
+        action = None
+
+    try:
+        action_name = str(action.ActionName)
+    except Exception:
+        action_name = "<unreadable>"
+
+    logging.warning(
+        "[SnappyMovement crouchdiag] event "
+        f"func={_bound_function_path(func)!r} "
+        f"ability={_path(obj)!r} "
+        f"action={_path(action)!r} action_name={action_name!r} "
+        f"pawn={_path(pawn)!r} "
+        f"falling={_is_falling(pawn)} "
+        f"wants_crouch={_wants_crouch(pawn)} "
+        f"wants_slide={_movement_flag(movement, 'bWantsToSlide')}"
+    )
+
+
+def _crouch_flush_probe(
+    obj: UObject,
+    _args: WrappedStruct,
+    _ret: Any,
+    func: BoundFunction,
+) -> None:
+    pawn = _get_current_pawn()
+    movement = _get_move_component(pawn) if pawn is not None else None
+    logging.warning(
+        "[SnappyMovement crouchdiag] flush "
+        f"func={_bound_function_path(func)!r} "
+        f"ability={_path(obj)!r} "
+        f"pawn={_path(pawn)!r} "
+        f"falling={_is_falling(pawn)} "
+        f"wants_crouch={_wants_crouch(pawn)} "
+        f"wants_slide={_movement_flag(movement, 'bWantsToSlide')}"
+    )
+
+
+def _remove_crouch_dynamic_hooks() -> None:
+    global _crouch_dynamic_hooks
+
+    for path, identifier in tuple(_crouch_dynamic_hooks):
+        try:
+            remove_hook(path, Type.POST, identifier)
+        except Exception:
+            pass
+    _crouch_dynamic_hooks = []
+
+
+def _install_crouch_dynamic_hooks() -> bool:
+    global _crouch_dynamic_hooks
+
+    if _crouch_dynamic_hooks:
+        return True
+
+    try:
+        abilities = list(unrealsdk.find_all("PlayerAbility_Crouch_C", exact=False))
+    except Exception as exc:
+        logging.warning(
+            "[SnappyMovement crouchdiag] ability search failed "
+            f"error={type(exc).__name__}:{exc}"
+        )
+        return False
+
+    live_abilities = []
+    for ability in abilities:
+        path = _path(ability)
+        if "Default__" in path:
+            continue
+        live_abilities.append(ability)
+
+    logging.warning(
+        "[SnappyMovement crouchdiag] ability search "
+        f"total={len(abilities)} live={len(live_abilities)} "
+        f"paths={[ _path(x) for x in live_abilities ]!r}"
+    )
+
+    if not live_abilities:
+        return False
+
+    cls = live_abilities[0].Class
+    class_path = _path(cls)
+    logging.warning(
+        "[SnappyMovement crouchdiag] class "
+        f"path={class_path!r}"
+    )
+
+    targets = (
+        (_CROUCH_INPUT_FN_5, _crouch_probe_callback),
+        (_CROUCH_INPUT_FN_6, _crouch_probe_callback),
+        (_CROUCH_FLUSH_FN, _crouch_flush_probe),
+    )
+
+    installed: list[tuple[str, str]] = []
+    for index, (name, callback) in enumerate(targets):
+        path = f"{class_path}:{name}"
+        try:
+            fn = unrealsdk.find_object("Function", path)
+            found = fn is not None
+        except Exception:
+            found = False
+
+        logging.warning(
+            "[SnappyMovement crouchdiag] resolve "
+            f"path={path!r} found={found}"
+        )
+        if not found:
+            continue
+
+        identifier = f"{_CROUCH_DYNAMIC_ID_PREFIX}:{index}"
+        try:
+            add_hook(path, Type.POST, identifier, callback)
+        except Exception as exc:
+            logging.warning(
+                "[SnappyMovement crouchdiag] hook install failed "
+                f"path={path!r} error={type(exc).__name__}:{exc}"
+            )
+            continue
+
+        installed.append((path, identifier))
+        logging.warning(
+            "[SnappyMovement crouchdiag] hook installed "
+            f"path={path!r}"
+        )
+
+    _crouch_dynamic_hooks = installed
+    return len(installed) >= 2
+
+
 def _reset_flow_state() -> None:
     global _sprint_chain_armed
     global _resume_sprint_after_landing
@@ -427,9 +591,11 @@ def _on_enable() -> None:
         f"slide_from_landing={bool(slide_from_landing_option.value)} "
         f"controller={_path(controller)!r} pawn={_path(pawn)!r}"
     )
+    _install_crouch_dynamic_hooks()
 
 
 def _on_disable() -> None:
+    _remove_crouch_dynamic_hooks()
     _reset_flow_state()
     _restore_all()
 
@@ -528,6 +694,7 @@ def _on_jumped(
         "[SnappyMovement raw] OnJumped "
         f"obj={_path(obj)!r} current={_path(_get_current_pawn())!r}"
     )
+    _install_crouch_dynamic_hooks()
 
     if not _same_uobject(obj, _get_current_pawn()):
         return
@@ -753,6 +920,7 @@ def _client_restart(
     _reset_flow_state()
     acceleration, braking = _current_values()
     _apply_to_pawn(pawn, acceleration, braking, report_failure=True)
+    _install_crouch_dynamic_hooks()
 
 
 def _on_profile_change(_option: SpinnerOption, new_value: str) -> None:
