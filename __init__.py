@@ -549,7 +549,7 @@ def _on_disable() -> None:
 
 
 
-@hook("WillowGame.WillowPlayerController:PlayerTick", Type.POST)
+@hook("OakGame.OakPlayerController:PlayerTick", Type.POST)
 def _diagnostic_player_tick(
     obj: UObject,
     _args: WrappedStruct,
