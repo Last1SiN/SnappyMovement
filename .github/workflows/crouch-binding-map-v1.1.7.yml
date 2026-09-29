@@ -1,0 +1,124 @@
+name: Temporary SnappyMovement crouch binding-map diagnostic v1.1.7
+
+on:
+  push:
+    branches:
+      - diag-crouch-binding-map-v1.1.7
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate crouch binding-map diagnostic and package
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import ast, hashlib, tomllib, zipfile
+
+          source = Path("__init__.py")
+          text = source.read_text(encoding="utf-8")
+          tree = ast.parse(text, filename=str(source))
+          compile(text, str(source), "exec")
+
+          required = (
+              'get_pc(possibly_loading=True)',
+              'def _same_uobject(',
+              'hooks=HOOKS',
+              '_GBX_DISCRETE_ACTION_HOOK = "/Script/GbxInput.GbxInputComponent:StartInputAction_Discrete_Impl"',
+              '@hook(_GBX_DISCRETE_ACTION_HOOK, Type.POST)',
+              '[SnappyMovement actiondiag] Crouch',
+              'DynamicBindingObjects',
+              'InputActionReceiverDelegateBindings',
+              'InputEvent',
+              'FunctionNameToBind',
+              '[SnappyMovement bindingdiag] Crouch binding',
+              '_log_crouch_binding_metadata(cls)',
+              '/Game/PlayerCharacters/_Shared/_Design/Character/BPChar_Player.BPChar_Player_C:OnLanded',
+              '@hook("/Script/Engine.Character:K2_OnMovementModeChanged", Type.POST)',
+          )
+          for needle in required:
+              assert needle in text, needle
+
+          for forbidden in (
+              "WillowGame.WillowPlayerController:PlayerTick",
+              "OakGame.OakPlayerController:PlayerTick",
+              "GameViewportClient:Tick",
+              "OakPlayerController:InputKey",
+              "Velocity =",
+              "MaxWalkSpeed =",
+              "MaxSprintSpeed =",
+              "def _on_landed_pre",
+          ):
+              assert forbidden not in text, forbidden
+
+          assert text.count("@hook(") == 10
+          assert text.count("add_hook(") == 1
+          assert text.count("pawn.SetWantsToSprint(True)") == 1
+          assert text.count("pawn.SetWantsToSlide(True)") == 1
+          assert text.count("_log_crouch_binding_metadata(cls)") == 1
+
+          hooks_tuple = None
+          for node in tree.body:
+              if isinstance(node, ast.Assign) and any(
+                  isinstance(t, ast.Name) and t.id == "HOOKS" for t in node.targets
+              ):
+                  hooks_tuple = node.value
+                  break
+          assert isinstance(hooks_tuple, ast.Tuple)
+          names = [elt.id for elt in hooks_tuple.elts if isinstance(elt, ast.Name)]
+          assert names == [
+              "_set_wants_to_sprint",
+              "_on_start_sprinting",
+              "_on_end_sprinting",
+              "_on_jumped",
+              "_on_landed_post",
+              "_movement_mode_changed",
+              "_movement_component_mode_changed",
+              "_set_wants_to_slide",
+              "_gbx_discrete_action_probe",
+              "_client_restart",
+          ], names
+
+          meta = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+          version = meta["project"]["version"]
+          assert version == meta["tool"]["sdkmod"]["version"] == "1.1.7"
+          assert tuple(int(x) for x in version.split(".")) == (1, 1, 7)
+
+          stage = Path("stage/SnappyMovement")
+          stage.mkdir(parents=True, exist_ok=True)
+          for name in ("__init__.py","pyproject.toml","README.md","README_RU.md","LICENSE","ADDITIONAL_TERMS.md"):
+              (stage/name).write_bytes(Path(name).read_bytes())
+
+          archive = Path("dist/SnappyMovement.sdkmod")
+          archive.parent.mkdir(exist_ok=True)
+          with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+              for path in sorted(stage.rglob("*")):
+                  if path.is_file():
+                      zf.write(path, path.relative_to(stage.parent).as_posix())
+
+          with zipfile.ZipFile(archive) as zf:
+              names = [n for n in zf.namelist() if n and not n.endswith("/")]
+              assert archive.stem == "SnappyMovement"
+              assert {n.split("/", 1)[0] for n in names} == {"SnappyMovement"}
+              assert len(names) == 6
+              assert "SnappyMovement/__init__.py" in names
+              assert not any("__pycache__" in n or n.endswith((".pyc",".pyo")) for n in names)
+
+          print("source_sha256", hashlib.sha256(source.read_bytes()).hexdigest())
+          print("artifact_sha256", hashlib.sha256(archive.read_bytes()).hexdigest())
+          print("CROUCH_BINDING_MAP_V117_GATES_PASS")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SnappyMovement-crouch-binding-map-v1.1.7
+          path: dist/SnappyMovement.sdkmod
+          if-no-files-found: error
