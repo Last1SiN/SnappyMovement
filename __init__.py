@@ -116,8 +116,10 @@ _CROUCH_INPUT_FN_6 = (
     "K2Node_GbxInputActionEvent_Discrete_6"
 )
 _CROUCH_FLUSH_FN = "FlushCrouchInput"
-_CROUCH_DYNAMIC_ID_PREFIX = "snappymovement:crouch-input-diag:v1.1.5"
+_CROUCH_DYNAMIC_ID_PREFIX = "snappymovement:crouch-input-diag:v1.1.6"
 _crouch_dynamic_hooks: list[tuple[str, str]] = []
+
+_GBX_DISCRETE_ACTION_HOOK = "/Script/GbxInput.GbxInputComponent:StartInputAction_Discrete_Impl"
 
 
 def _error(message: str) -> None:
@@ -391,6 +393,44 @@ def _bound_function_path(func: BoundFunction) -> str:
             return "<unreadable-function>"
 
 
+
+@hook(_GBX_DISCRETE_ACTION_HOOK, Type.POST)
+def _gbx_discrete_action_probe(
+    obj: UObject,
+    args: WrappedStruct,
+    _ret: Any,
+    _func: BoundFunction,
+) -> None:
+    try:
+        action = args.DiscreteAction
+    except Exception:
+        return
+
+    try:
+        action_name = str(action.ActionName)
+    except Exception:
+        action_name = "<unreadable>"
+
+    if action_name.lower() != "crouch":
+        return
+
+    pawn = _get_current_pawn()
+    movement = _get_move_component(pawn) if pawn is not None else None
+    try:
+        consumed = bool(args.bConsumeEvent)
+    except Exception:
+        consumed = False
+
+    logging.warning(
+        "[SnappyMovement actiondiag] Crouch "
+        f"component={_path(obj)!r} action={_path(action)!r} "
+        f"consume={consumed} pawn={_path(pawn)!r} "
+        f"falling={_is_falling(pawn)} "
+        f"wants_crouch={_wants_crouch(pawn)} "
+        f"wants_slide={_movement_flag(movement, 'bWantsToSlide')}"
+    )
+
+
 def _crouch_probe_callback(
     obj: UObject,
     args: WrappedStruct,
@@ -590,6 +630,15 @@ def _on_enable() -> None:
         f"remember_sprint={bool(remember_sprint_option.value)} "
         f"slide_from_landing={bool(slide_from_landing_option.value)} "
         f"controller={_path(controller)!r} pawn={_path(pawn)!r}"
+    )
+    try:
+        _gbx_target = unrealsdk.find_object("Function", _GBX_DISCRETE_ACTION_HOOK)
+        _gbx_found = _gbx_target is not None
+    except Exception:
+        _gbx_found = False
+    logging.warning(
+        "[SnappyMovement actiondiag] target "
+        f"path={_GBX_DISCRETE_ACTION_HOOK!r} found={_gbx_found}"
     )
     _install_crouch_dynamic_hooks()
 
@@ -1074,6 +1123,7 @@ HOOKS = (
     _movement_mode_changed,
     _movement_component_mode_changed,
     _set_wants_to_slide,
+    _gbx_discrete_action_probe,
     _client_restart,
 )
 
