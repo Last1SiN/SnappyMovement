@@ -27,7 +27,7 @@ jobs:
           required = (
               'display_name="Remember Sprint"',
               'display_name="Slide from Landing"',
-              '@hook("/Game/PlayerCharacters/_Shared/_Design/Character/BPChar_Player.BPChar_Player_C:OnLanded",',
+              '/Game/PlayerCharacters/_Shared/_Design/Character/BPChar_Player.BPChar_Player_C:OnLanded',
               'Type.POST',
               '@hook("/Script/Engine.Character:K2_OnMovementModeChanged", Type.POST)',
               '@hook("/Script/Engine.CharacterMovementComponent:SetMovementMode", Type.POST)',
