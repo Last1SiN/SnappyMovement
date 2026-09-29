@@ -116,7 +116,7 @@ _CROUCH_INPUT_FN_6 = (
     "K2Node_GbxInputActionEvent_Discrete_6"
 )
 _CROUCH_FLUSH_FN = "FlushCrouchInput"
-_CROUCH_DYNAMIC_ID_PREFIX = "snappymovement:crouch-input-diag:v1.1.6"
+_CROUCH_DYNAMIC_ID_PREFIX = "snappymovement:crouch-input-diag:v1.1.7"
 _crouch_dynamic_hooks: list[tuple[str, str]] = []
 
 _GBX_DISCRETE_ACTION_HOOK = "/Script/GbxInput.GbxInputComponent:StartInputAction_Discrete_Impl"
@@ -431,6 +431,93 @@ def _gbx_discrete_action_probe(
     )
 
 
+def _binding_event_debug(value: Any) -> tuple[str, str]:
+    try:
+        event_name = str(value.name)
+    except Exception:
+        event_name = str(value)
+    try:
+        raw = getattr(value, "value", value)
+        event_value = str(int(raw))
+    except Exception:
+        event_value = repr(value)
+    return event_name, event_value
+
+
+def _log_crouch_binding_metadata(cls: UObject) -> bool:
+    class_path = _path(cls)
+
+    try:
+        dynamic_bindings = list(cls.DynamicBindingObjects)
+    except Exception as exc:
+        logging.warning(
+            "[SnappyMovement bindingdiag] DynamicBindingObjects unavailable "
+            f"class={class_path!r} error={type(exc).__name__}:{exc}"
+        )
+        return False
+
+    logging.warning(
+        "[SnappyMovement bindingdiag] dynamic bindings "
+        f"class={class_path!r} count={len(dynamic_bindings)} "
+        f"paths={[ _path(x) for x in dynamic_bindings ]!r}"
+    )
+
+    matches = 0
+    for binding_obj in dynamic_bindings:
+        try:
+            entries = list(binding_obj.InputActionReceiverDelegateBindings)
+        except Exception:
+            continue
+
+        for entry in entries:
+            try:
+                action = entry.Action
+            except Exception:
+                action = None
+
+            try:
+                action_name = str(action.ActionName)
+            except Exception:
+                action_name = "<unreadable>"
+
+            if action_name.lower() != "crouch":
+                continue
+
+            try:
+                input_event = entry.InputEvent
+            except Exception:
+                input_event = None
+            event_name, event_value = _binding_event_debug(input_event)
+
+            try:
+                function_name = str(entry.FunctionNameToBind)
+            except Exception:
+                function_name = "<unreadable>"
+
+            function_path = f"{class_path}:{function_name}"
+            try:
+                found = unrealsdk.find_object("Function", function_path) is not None
+            except Exception:
+                found = False
+
+            matches += 1
+            logging.warning(
+                "[SnappyMovement bindingdiag] Crouch binding "
+                f"binding={_path(binding_obj)!r} "
+                f"action={_path(action)!r} "
+                f"input_event_name={event_name!r} "
+                f"input_event_value={event_value!r} "
+                f"function={function_name!r} "
+                f"path={function_path!r} found={found}"
+            )
+
+    logging.warning(
+        "[SnappyMovement bindingdiag] Crouch binding summary "
+        f"class={class_path!r} matches={matches}"
+    )
+    return matches > 0
+
+
 def _crouch_probe_callback(
     obj: UObject,
     args: WrappedStruct,
@@ -529,6 +616,8 @@ def _install_crouch_dynamic_hooks() -> bool:
         "[SnappyMovement crouchdiag] class "
         f"path={class_path!r}"
     )
+
+    _log_crouch_binding_metadata(cls)
 
     targets = (
         (_CROUCH_INPUT_FN_5, _crouch_probe_callback),
