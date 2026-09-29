@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import math
+import time
 from typing import Any
 
 import unrealsdk
-from mods_base import Game, Mod, SliderOption, SpinnerOption, build_mod, hook
+from mods_base import MODS_DIR, Game, Mod, SliderOption, SpinnerOption, build_mod, hook
 from unrealsdk import logging
 from unrealsdk.hooks import Type
 from unrealsdk.unreal import BoundFunction, UObject, WrappedStruct
@@ -255,12 +256,316 @@ def _restore_all() -> None:
     _patched_components = []
 
 
+
+# ---------------------------------------------------------------------------
+# Temporary runtime probe for Remember Sprint / Slide on Landing research.
+# This branch is diagnostic only. It does not force sprint, crouch, slide,
+# movement mode, velocity, or controlled moves.
+# ---------------------------------------------------------------------------
+
+DIAG_LOG = MODS_DIR / "SnappyMovement_Diagnostic.log"
+_DIAG_NAME_NEEDLES = (
+    "sprint",
+    "slide",
+    "crouch",
+    "land",
+    "fall",
+    "jump",
+    "controlled",
+    "movement",
+    "input",
+    "wants",
+)
+_DIAG_STATE_NEEDLES = (
+    "sprint",
+    "slide",
+    "crouch",
+    "land",
+    "fall",
+    "jump",
+    "controlledmove",
+    "movementmode",
+    "wants",
+)
+
+_diag_pawn_key: int | None = None
+_diag_properties: dict[str, tuple[Any, tuple[str, ...]]] = {}
+_diag_last_state: dict[str, str] = {}
+_diag_start_ns = 0
+_diag_last_heartbeat_ns = 0
+
+
+def _diag_write(message: str) -> None:
+    try:
+        with DIAG_LOG.open("a", encoding="utf-8", errors="replace") as file:
+            if _diag_start_ns:
+                elapsed_ms = (time.perf_counter_ns() - _diag_start_ns) / 1_000_000
+                file.write(f"[{elapsed_ms:10.3f} ms] {message}\n")
+            else:
+                file.write(f"{message}\n")
+    except Exception:
+        pass
+
+
+def _diag_repr(value: Any, limit: int = 320) -> str:
+    try:
+        text = repr(value)
+    except Exception as exc:
+        text = f"<repr failed: {type(exc).__name__}: {exc}>"
+    if len(text) > limit:
+        return text[: limit - 3] + "..."
+    return text
+
+
+def _diag_object_key(obj: Any) -> int:
+    try:
+        return int(obj._get_address())
+    except Exception:
+        return id(obj)
+
+
+def _diag_function_signature(value: Any) -> str:
+    func = getattr(value, "func", None)
+    if func is None:
+        return ""
+    try:
+        params = []
+        for prop in func._properties():
+            params.append(f"{prop.Name}:{prop.Class.Name}")
+        return (
+            f" NumParams={int(func.NumParams)}"
+            f" ParamsSize={int(func.ParamsSize)}"
+            f" props=[{', '.join(params)}]"
+        )
+    except Exception:
+        return ""
+
+
+def _diag_discover(label: str, obj: Any) -> tuple[str, ...]:
+    if obj is None:
+        _diag_write(f"OBJECT {label}=<None>")
+        return ()
+
+    try:
+        class_name = str(obj.Class.Name)
+    except Exception:
+        class_name = type(obj).__name__
+
+    try:
+        path = _path(obj)
+    except Exception:
+        path = "<unknown>"
+
+    _diag_write(
+        f"OBJECT {label} class={class_name} path={path} "
+        f"address=0x{_diag_object_key(obj):x}"
+    )
+
+    properties: list[str] = []
+    try:
+        names = sorted(
+            str(name)
+            for name in dir(obj)
+            if not str(name).startswith("_")
+            and any(needle in str(name).lower() for needle in _DIAG_NAME_NEEDLES)
+        )
+    except Exception as exc:
+        _diag_write(f"DISCOVERY {label} dir ERROR={type(exc).__name__}: {exc}")
+        return ()
+
+    for name in names[:240]:
+        try:
+            value = getattr(obj, name)
+        except Exception as exc:
+            _diag_write(
+                f"ATTR {label}.{name} READ_ERROR={type(exc).__name__}: {exc}"
+            )
+            continue
+
+        if callable(value):
+            _diag_write(
+                f"METHOD {label}.{name}{_diag_function_signature(value)}"
+            )
+            continue
+
+        lower = name.lower().replace("_", "")
+        if any(needle in lower for needle in _DIAG_STATE_NEEDLES):
+            properties.append(name)
+        _diag_write(f"PROP {label}.{name}={_diag_repr(value)}")
+
+    return tuple(properties)
+
+
+def _diag_named_objects(pawn: UObject) -> dict[str, Any]:
+    controller = _find_local_controller()
+    movement = _get_move_component(pawn)
+    try:
+        player_input = controller.PlayerInput if controller is not None else None
+    except Exception:
+        player_input = None
+    return {
+        "PC": controller,
+        "Pawn": pawn,
+        "Move": movement,
+        "Input": player_input,
+    }
+
+
+def _diag_setup_for_pawn(pawn: UObject) -> None:
+    global _diag_pawn_key, _diag_properties, _diag_last_state
+
+    _diag_pawn_key = _diag_object_key(pawn)
+    _diag_properties = {}
+    _diag_last_state = {}
+
+    _diag_write("=" * 78)
+    _diag_write("NEW LOCAL PAWN - movement API discovery")
+    for label, obj in _diag_named_objects(pawn).items():
+        if obj is None:
+            _diag_discover(label, obj)
+            continue
+        names = _diag_discover(label, obj)
+        _diag_properties[label] = (obj, names)
+
+    _diag_write(
+        "TEST ORDER: "
+        "1) sprint -> jump -> land; pause. "
+        "2) sprint -> slide -> jump -> land; pause. "
+        "3) jump -> hold crouch in air -> keep holding through landing; pause."
+    )
+    _diag_write("=" * 78)
+
+
+def _diag_fixed_state(pawn: UObject) -> dict[str, str]:
+    state: dict[str, str] = {}
+
+    movement = _get_move_component(pawn)
+    if movement is not None:
+        for name in ("MovementMode", "Velocity"):
+            try:
+                state[f"Move.{name}"] = _diag_repr(getattr(movement, name), 180)
+            except Exception:
+                pass
+
+    for name in ("bIsCrouched", "bPressedJump"):
+        try:
+            state[f"Pawn.{name}"] = _diag_repr(getattr(pawn, name), 180)
+        except Exception:
+            pass
+
+    for name in (
+        "GetLastMovementInputVector",
+        "GetPendingMovementInputVector",
+        "GetVelocity",
+    ):
+        try:
+            value = getattr(pawn, name)
+            if callable(value):
+                state[f"Pawn.{name}()"] = _diag_repr(value(), 180)
+        except Exception:
+            pass
+
+    return state
+
+
+def _diag_collect_state(pawn: UObject) -> dict[str, str]:
+    state = _diag_fixed_state(pawn)
+
+    for label, (obj, names) in tuple(_diag_properties.items()):
+        if obj is None:
+            continue
+        for name in names:
+            try:
+                value = getattr(obj, name)
+            except Exception:
+                continue
+            if callable(value):
+                continue
+            state[f"{label}.{name}"] = _diag_repr(value, 180)
+
+    return state
+
+
+def _diag_reset_log() -> None:
+    global _diag_pawn_key, _diag_properties, _diag_last_state
+    global _diag_start_ns, _diag_last_heartbeat_ns
+
+    _diag_pawn_key = None
+    _diag_properties = {}
+    _diag_last_state = {}
+    _diag_start_ns = time.perf_counter_ns()
+    _diag_last_heartbeat_ns = _diag_start_ns
+
+    try:
+        DIAG_LOG.write_text(
+            "SnappyMovement sprint/slide runtime diagnostic 1.0.1\n"
+            "Passive probe: no sprint/slide/crouch requests are issued by this diagnostic.\n",
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def _diag_tick() -> None:
+    global _diag_last_state, _diag_last_heartbeat_ns
+
+    pawn = _get_current_pawn()
+    if pawn is None:
+        return
+
+    key = _diag_object_key(pawn)
+    if key != _diag_pawn_key:
+        _diag_setup_for_pawn(pawn)
+
+    state = _diag_collect_state(pawn)
+
+    changes = []
+    for name, value in state.items():
+        previous = _diag_last_state.get(name)
+        if previous != value:
+            changes.append(f"{name}: {previous!r} -> {value}")
+
+    for name in _diag_last_state.keys() - state.keys():
+        changes.append(f"{name}: {_diag_last_state[name]!r} -> <unavailable>")
+
+    if changes:
+        _diag_write("STATE " + " | ".join(changes))
+        _diag_last_state = state
+
+    now = time.perf_counter_ns()
+    if now - _diag_last_heartbeat_ns >= 5_000_000_000:
+        _diag_last_heartbeat_ns = now
+        _diag_write("HEARTBEAT " + " | ".join(f"{k}={v}" for k, v in state.items()))
+
+
 def _on_enable() -> None:
     _apply_current_values()
+    _diag_reset_log()
 
 
 def _on_disable() -> None:
     _restore_all()
+    _diag_write("DIAGNOSTIC STOPPED")
+
+
+
+@hook("WillowGame.WillowPlayerController:PlayerTick", Type.POST)
+def _diagnostic_player_tick(
+    obj: UObject,
+    _args: WrappedStruct,
+    _ret: Any,
+    _func: BoundFunction,
+) -> None:
+    try:
+        if not bool(obj.IsLocalController()):
+            return
+    except Exception:
+        return
+
+    try:
+        _diag_tick()
+    except Exception as exc:
+        _diag_write(f"DIAGNOSTIC TICK ERROR={type(exc).__name__}: {exc}")
 
 
 @hook("/Script/Engine.PlayerController:ClientRestart", Type.POST)
