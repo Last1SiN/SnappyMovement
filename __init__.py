@@ -532,7 +532,7 @@ def _on_landed_pre(
     )
 
 
-@hook("/Script/Engine.CharacterMovementComponent:SetMovementMode", Type.POST)
+@hook("/Script/Engine.Character:K2_OnMovementModeChanged", Type.POST)
 def _movement_mode_changed(
     obj: UObject,
     args: WrappedStruct,
@@ -542,20 +542,17 @@ def _movement_mode_changed(
     global _landing_crouch_pending
     global _landing_transition_pending
 
-    pawn = _get_current_pawn()
-    if pawn is None:
-        return
-
-    movement = _get_move_component(pawn)
-    if not _same_uobject(obj, movement) or not _landing_transition_pending:
+    if not _same_uobject(obj, _get_current_pawn()) or not _landing_transition_pending:
         return
 
     try:
-        new_mode = int(args.NewMovementMode)
+        new_mode_raw = args.NewMovementMode
+        new_mode = int(getattr(new_mode_raw, "value", new_mode_raw))
     except Exception:
         return
 
-    # MOVE_Walking == 1. Do nothing until the engine has actually finalized landing.
+    # MOVE_Walking == 1. K2_OnMovementModeChanged is the post-transition Blueprint event,
+    # so at this point the character has actually left MOVE_Falling.
     if new_mode != 1:
         return
 
@@ -564,10 +561,10 @@ def _movement_mode_changed(
     slide_requested = False
     if bool(slide_from_landing_option.value) and _landing_crouch_pending:
         try:
-            pawn.SetWantsToSlide(True)
+            obj.SetWantsToSlide(True)
             slide_requested = True
             logging.warning(
-                "[SnappyMovement test] Slide from Landing requested after MOVE_Walking"
+                "[SnappyMovement test] Slide from Landing requested after K2 MOVE_Walking"
             )
         except Exception as exc:
             _error(f"Slide from Landing: failed to request native slide: {exc}")
@@ -575,7 +572,7 @@ def _movement_mode_changed(
     _landing_crouch_pending = False
 
     if not slide_requested:
-        restored = _restore_remembered_sprint(pawn, "MOVE_Walking")
+        restored = _restore_remembered_sprint(obj, "K2 MOVE_Walking")
         logging.warning(
             "[SnappyMovement test] landing finalized "
             f"remember_restored={restored}"
