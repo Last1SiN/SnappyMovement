@@ -498,7 +498,7 @@ def _diag_reset_log() -> None:
 
     try:
         DIAG_LOG.write_text(
-            "SnappyMovement sprint/slide runtime diagnostic 1.0.1\n"
+            "SnappyMovement sprint/slide runtime diagnostic 1.0.3\n"
             "Passive probe: no sprint/slide/crouch requests are issued by this diagnostic.\n",
             encoding="utf-8",
         )
@@ -538,18 +538,56 @@ def _diag_tick() -> None:
         _diag_write("HEARTBEAT " + " | ".join(f"{k}={v}" for k, v in state.items()))
 
 
+def _diag_set_hook_enabled(hook_obj: Any, enabled: bool, label: str) -> None:
+    try:
+        fn = getattr(hook_obj, "enable" if enabled else "disable", None)
+        if not callable(fn):
+            _diag_write(f"HOOK {label} {('ENABLE' if enabled else 'DISABLE')} ERROR=no method")
+            return
+        fn()
+        _diag_write(f"HOOK {label} {('ENABLED' if enabled else 'DISABLED')}")
+    except Exception as exc:
+        _diag_write(
+            f"HOOK {label} {('ENABLE' if enabled else 'DISABLE')} "
+            f"ERROR={type(exc).__name__}: {exc}"
+        )
+
+
+def _diag_sync_hooks(enabled: bool) -> None:
+    for hook_obj, label in (
+        (_diagnostic_player_tick, "Oak+Engine PlayerTick"),
+        (_diagnostic_viewport_tick, "GameViewportClient Tick"),
+        (_diagnostic_input_key, "OakPlayerController InputKey"),
+    ):
+        _diag_set_hook_enabled(hook_obj, enabled, label)
+
+
 def _on_enable() -> None:
     _apply_current_values()
     _diag_reset_log()
+    _diag_sync_hooks(True)
+    _diag_write("DIAGNOSTIC ARMED")
 
 
 def _on_disable() -> None:
+    _diag_sync_hooks(False)
     _restore_all()
     _diag_write("DIAGNOSTIC STOPPED")
 
 
 
-@hook("OakGame.OakPlayerController:PlayerTick", Type.POST)
+@hook(
+    "OakGame.OakPlayerController:PlayerTick",
+    Type.POST,
+    immediately_enable=False,
+    hook_identifier="snappy_diag_ptick_oak_v3",
+)
+@hook(
+    "Engine.PlayerController:PlayerTick",
+    Type.POST,
+    immediately_enable=False,
+    hook_identifier="snappy_diag_ptick_engine_v3",
+)
 def _diagnostic_player_tick(
     obj: UObject,
     _args: WrappedStruct,
@@ -557,15 +595,74 @@ def _diagnostic_player_tick(
     _func: BoundFunction,
 ) -> None:
     try:
-        if not bool(obj.IsLocalController()):
+        controller = _find_local_controller()
+        if controller is not None and obj is not controller:
             return
     except Exception:
-        return
+        pass
 
     try:
         _diag_tick()
     except Exception as exc:
-        _diag_write(f"DIAGNOSTIC TICK ERROR={type(exc).__name__}: {exc}")
+        _diag_write(f"PLAYER TICK ERROR={type(exc).__name__}: {exc}")
+
+
+@hook(
+    "/Script/Engine.GameViewportClient:Tick",
+    Type.POST,
+    immediately_enable=False,
+    hook_identifier="snappy_diag_viewport_script_v3",
+)
+@hook(
+    "Engine.GameViewportClient:Tick",
+    Type.POST,
+    immediately_enable=False,
+    hook_identifier="snappy_diag_viewport_engine_v3",
+)
+@hook(
+    "OakGame.OakGameViewportClient:Tick",
+    Type.POST,
+    immediately_enable=False,
+    hook_identifier="snappy_diag_viewport_oak_v3",
+)
+def _diagnostic_viewport_tick(
+    _obj: UObject,
+    _args: WrappedStruct,
+    _ret: Any,
+    _func: BoundFunction,
+) -> None:
+    try:
+        _diag_tick()
+    except Exception as exc:
+        _diag_write(f"VIEWPORT TICK ERROR={type(exc).__name__}: {exc}")
+
+
+@hook(
+    "OakGame.OakPlayerController:InputKey",
+    Type.POST,
+    immediately_enable=False,
+    hook_identifier="snappy_diag_input_oak_v3",
+)
+def _diagnostic_input_key(
+    obj: UObject,
+    args: WrappedStruct,
+    _ret: Any,
+    _func: BoundFunction,
+) -> None:
+    try:
+        controller = _find_local_controller()
+        if controller is not None and obj is not controller:
+            return
+    except Exception:
+        pass
+
+    try:
+        key = getattr(args, "Key", None)
+        event = getattr(args, "EventType", None)
+        _diag_write(f"INPUT key={_diag_repr(key,120)} event={_diag_repr(event,120)}")
+        _diag_tick()
+    except Exception as exc:
+        _diag_write(f"INPUT HOOK ERROR={type(exc).__name__}: {exc}")
 
 
 @hook("/Script/Engine.PlayerController:ClientRestart", Type.POST)
