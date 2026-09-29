@@ -4,7 +4,7 @@ import math
 from typing import Any
 
 import unrealsdk
-from mods_base import BoolOption, Game, Mod, SliderOption, SpinnerOption, build_mod, hook
+from mods_base import BoolOption, Game, Mod, SliderOption, SpinnerOption, build_mod, get_pc, hook
 from unrealsdk import logging
 from unrealsdk.hooks import Type
 from unrealsdk.unreal import BoundFunction, UObject, WrappedStruct
@@ -173,15 +173,31 @@ def _current_values(profile: str | None = None) -> tuple[float, float]:
 
 
 def _find_local_controller() -> UObject | None:
+    # Oak's local controller is exposed directly by mods_base. This is the same
+    # path proven by the earlier SnappyMovement diagnostics.
+    try:
+        controller = get_pc(possibly_loading=True)
+    except Exception:
+        controller = None
+
+    if controller is not None:
+        try:
+            if bool(controller.IsLocalController()):
+                return controller
+        except Exception:
+            pass
+
+    # Fallback only. find_all() alone is not reliable enough on BL3 and was the
+    # cause of feature hooks seeing current pawn as None in v1.1.0-v1.1.3.
     try:
         controllers = unrealsdk.find_all("PlayerController", exact=False)
     except Exception:
         return None
 
-    for controller in controllers:
+    for candidate in controllers:
         try:
-            if bool(controller.IsLocalController()):
-                return controller
+            if bool(candidate.IsLocalController()):
+                return candidate
         except Exception:
             continue
 
@@ -403,10 +419,13 @@ def _restore_remembered_sprint(pawn: UObject | None, reason: str) -> bool:
 def _on_enable() -> None:
     _reset_flow_state()
     _apply_current_values()
+    controller = _find_local_controller()
+    pawn = _get_current_pawn()
     logging.warning(
         "[SnappyMovement test] enabled "
         f"remember_sprint={bool(remember_sprint_option.value)} "
-        f"slide_from_landing={bool(slide_from_landing_option.value)}"
+        f"slide_from_landing={bool(slide_from_landing_option.value)} "
+        f"controller={_path(controller)!r} pawn={_path(pawn)!r}"
     )
 
 
