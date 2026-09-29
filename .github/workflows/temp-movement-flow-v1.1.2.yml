@@ -33,7 +33,7 @@ jobs:
               '@hook("/Script/Engine.CharacterMovementComponent:SetMovementMode", Type.POST)',
               '_air_slide_intent',
               'landing captured POST',
-              'SetWantsToSlide requested=',
+              '[SnappyMovement test] SetWantsToSlide ',
               'Slide from Landing requested',
               'Remember Sprint restored after',
               '[SnappyMovement test] OnJumped',
