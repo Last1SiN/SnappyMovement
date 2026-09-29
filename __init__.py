@@ -107,16 +107,16 @@ _landing_crouch_pending = False
 _landing_transition_pending = False
 _air_slide_intent = False
 
+_CROUCH_INPUT_FN_4 = (
+    "GbxInpActEvt_InputAction_Discrete_Crouch_"
+    "K2Node_GbxInputActionEvent_Discrete_4"
+)
 _CROUCH_INPUT_FN_5 = (
     "GbxInpActEvt_InputAction_Discrete_Crouch_"
     "K2Node_GbxInputActionEvent_Discrete_5"
 )
-_CROUCH_INPUT_FN_6 = (
-    "GbxInpActEvt_InputAction_Discrete_Crouch_"
-    "K2Node_GbxInputActionEvent_Discrete_6"
-)
 _CROUCH_FLUSH_FN = "FlushCrouchInput"
-_CROUCH_DYNAMIC_ID_PREFIX = "snappymovement:crouch-input-diag:v1.1.7"
+_CROUCH_DYNAMIC_ID_PREFIX = "snappymovement:crouch-input-diag:v1.1.8"
 _crouch_dynamic_hooks: list[tuple[str, str]] = []
 
 _GBX_DISCRETE_ACTION_HOOK = "/Script/GbxInput.GbxInputComponent:StartInputAction_Discrete_Impl"
@@ -537,9 +537,18 @@ def _crouch_probe_callback(
     except Exception:
         action_name = "<unreadable>"
 
+    function_path = _bound_function_path(func)
+    if function_path.endswith(_CROUCH_INPUT_FN_4):
+        input_event = "IE_Pressed"
+    elif function_path.endswith(_CROUCH_INPUT_FN_5):
+        input_event = "IE_Released"
+    else:
+        input_event = "<unknown>"
+
     logging.warning(
         "[SnappyMovement crouchdiag] event "
-        f"func={_bound_function_path(func)!r} "
+        f"input_event={input_event!r} "
+        f"func={function_path!r} "
         f"ability={_path(obj)!r} "
         f"action={_path(action)!r} action_name={action_name!r} "
         f"pawn={_path(pawn)!r} "
@@ -620,8 +629,8 @@ def _install_crouch_dynamic_hooks() -> bool:
     _log_crouch_binding_metadata(cls)
 
     targets = (
+        (_CROUCH_INPUT_FN_4, _crouch_probe_callback),
         (_CROUCH_INPUT_FN_5, _crouch_probe_callback),
-        (_CROUCH_INPUT_FN_6, _crouch_probe_callback),
         (_CROUCH_FLUSH_FN, _crouch_flush_probe),
     )
 
