@@ -287,6 +287,17 @@ def _restore_all() -> None:
 
 
 
+def _same_uobject(left: UObject | None, right: UObject | None) -> bool:
+    if left is None or right is None:
+        return False
+    if left is right:
+        return True
+    try:
+        return int(left._get_address()) == int(right._get_address())
+    except Exception:
+        return False
+
+
 def _movement_bool(obj: UObject | None, method_name: str) -> bool:
     if obj is None:
         return False
@@ -403,7 +414,7 @@ def _set_wants_to_sprint(
     global _sprint_chain_armed
     global _resume_sprint_after_landing
 
-    if _restoring_sprint or obj is not _get_current_pawn():
+    if _restoring_sprint or not _same_uobject(obj, _get_current_pawn()):
         return
 
     try:
@@ -427,7 +438,7 @@ def _on_start_sprinting(
 ) -> None:
     global _sprint_chain_armed
 
-    if obj is not _get_current_pawn():
+    if not _same_uobject(obj, _get_current_pawn()):
         return
 
     if bool(remember_sprint_option.value):
@@ -443,7 +454,7 @@ def _on_end_sprinting(
 ) -> None:
     global _sprint_chain_armed
 
-    if obj is not _get_current_pawn() or not bool(remember_sprint_option.value):
+    if not _same_uobject(obj, _get_current_pawn()) or not bool(remember_sprint_option.value):
         return
 
     if _is_falling(obj) or _is_sliding(obj):
@@ -466,7 +477,7 @@ def _on_jumped(
     global _resume_sprint_after_landing
     global _landing_crouch_pending
 
-    if obj is not _get_current_pawn():
+    if not _same_uobject(obj, _get_current_pawn()):
         return
 
     _landing_crouch_pending = False
@@ -499,7 +510,7 @@ def _on_landed_pre(
 ) -> None:
     global _landing_crouch_pending
 
-    if obj is not _get_current_pawn() or not bool(slide_from_landing_option.value):
+    if not _same_uobject(obj, _get_current_pawn()) or not bool(slide_from_landing_option.value):
         _landing_crouch_pending = False
         return
 
@@ -520,7 +531,7 @@ def _on_landed_post(
 ) -> None:
     global _landing_crouch_pending
 
-    if obj is not _get_current_pawn():
+    if not _same_uobject(obj, _get_current_pawn()):
         return
 
     slide_requested = False
@@ -547,7 +558,7 @@ def _set_wants_to_slide(
     _ret: Any,
     _func: BoundFunction,
 ) -> None:
-    if obj is not _get_current_pawn():
+    if not _same_uobject(obj, _get_current_pawn()):
         return
 
     try:
