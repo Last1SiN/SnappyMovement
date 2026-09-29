@@ -105,6 +105,7 @@ _resume_sprint_after_landing = False
 _restoring_sprint = False
 _landing_crouch_pending = False
 _landing_transition_pending = False
+_air_slide_intent = False
 
 
 def _error(message: str) -> None:
@@ -357,12 +358,14 @@ def _reset_flow_state() -> None:
     global _restoring_sprint
     global _landing_crouch_pending
     global _landing_transition_pending
+    global _air_slide_intent
 
     _sprint_chain_armed = False
     _resume_sprint_after_landing = False
     _restoring_sprint = False
     _landing_crouch_pending = False
     _landing_transition_pending = False
+    _air_slide_intent = False
 
 
 def _restore_remembered_sprint(pawn: UObject | None, reason: str) -> bool:
@@ -430,6 +433,11 @@ def _set_wants_to_sprint(
     except Exception:
         return
 
+    logging.warning(
+        "[SnappyMovement test] SetWantsToSprint "
+        f"requested={requested} restoring={_restoring_sprint}"
+    )
+
     if requested:
         return
 
@@ -449,6 +457,7 @@ def _on_start_sprinting(
     if not _same_uobject(obj, _get_current_pawn()):
         return
 
+    logging.warning("[SnappyMovement test] OnStartSprinting")
     if bool(remember_sprint_option.value):
         _sprint_chain_armed = True
 
@@ -464,6 +473,12 @@ def _on_end_sprinting(
 
     if not _same_uobject(obj, _get_current_pawn()) or not bool(remember_sprint_option.value):
         return
+
+    logging.warning(
+        "[SnappyMovement test] OnEndSprinting "
+        f"falling={_is_falling(obj)} sliding={_is_sliding(obj)} "
+        f"wants={_wants_sprint(obj)}"
+    )
 
     if _is_falling(obj) or _is_sliding(obj):
         return
@@ -502,15 +517,21 @@ def _on_jumped(
     )
     _resume_sprint_after_landing = bool(sprint_related)
 
+    logging.warning(
+        "[SnappyMovement test] OnJumped "
+        f"sprint_related={sprint_related} "
+        f"remember_pending={_resume_sprint_after_landing}"
+    )
+
     if _resume_sprint_after_landing:
         logging.warning("[SnappyMovement test] Remember Sprint armed for landing")
 
 
 @hook(
     "/Game/PlayerCharacters/_Shared/_Design/Character/BPChar_Player.BPChar_Player_C:OnLanded",
-    Type.PRE,
+    Type.POST,
 )
-def _on_landed_pre(
+def _on_landed_post(
     obj: UObject,
     _args: WrappedStruct,
     _ret: Any,
@@ -523,13 +544,62 @@ def _on_landed_pre(
         return
 
     _landing_transition_pending = True
-    _landing_crouch_pending = bool(slide_from_landing_option.value) and _wants_crouch(obj)
+    _landing_crouch_pending = bool(slide_from_landing_option.value) and (
+        _wants_crouch(obj) or _air_slide_intent
+    )
 
     logging.warning(
-        "[SnappyMovement test] landing captured "
+        "[SnappyMovement test] landing captured POST "
         f"crouch={_landing_crouch_pending} "
+        f"air_slide_intent={_air_slide_intent} "
         f"remember_pending={_resume_sprint_after_landing}"
     )
+
+
+def _finalize_landing_after_walking(pawn: UObject | None, source: str) -> None:
+    global _landing_crouch_pending
+    global _landing_transition_pending
+    global _air_slide_intent
+
+    if pawn is None or not _landing_transition_pending:
+        return
+
+    movement = _get_move_component(pawn)
+    if movement is None:
+        return
+
+    try:
+        mode_raw = movement.MovementMode
+        mode = int(getattr(mode_raw, "value", mode_raw))
+    except Exception:
+        return
+
+    if mode != 1:
+        return
+
+    _landing_transition_pending = False
+
+    slide_requested = False
+    if bool(slide_from_landing_option.value) and _landing_crouch_pending:
+        try:
+            pawn.SetWantsToSlide(True)
+            slide_requested = True
+            logging.warning(
+                "[SnappyMovement test] Slide from Landing requested "
+                f"after {source} MOVE_Walking"
+            )
+        except Exception as exc:
+            _error(f"Slide from Landing: failed to request native slide: {exc}")
+
+    _landing_crouch_pending = False
+    _air_slide_intent = False
+
+    if not slide_requested:
+        restored = _restore_remembered_sprint(pawn, f"{source} MOVE_Walking")
+        logging.warning(
+            "[SnappyMovement test] landing finalized "
+            f"source={source} remember_restored={restored}"
+        )
 
 
 @hook("/Script/Engine.Character:K2_OnMovementModeChanged", Type.POST)
@@ -539,10 +609,7 @@ def _movement_mode_changed(
     _ret: Any,
     _func: BoundFunction,
 ) -> None:
-    global _landing_crouch_pending
-    global _landing_transition_pending
-
-    if not _same_uobject(obj, _get_current_pawn()) or not _landing_transition_pending:
+    if not _same_uobject(obj, _get_current_pawn()):
         return
 
     try:
@@ -551,32 +618,43 @@ def _movement_mode_changed(
     except Exception:
         return
 
-    # MOVE_Walking == 1. K2_OnMovementModeChanged is the post-transition Blueprint event,
-    # so at this point the character has actually left MOVE_Falling.
-    if new_mode != 1:
+    logging.warning(
+        "[SnappyMovement test] K2 movement mode "
+        f"new={new_mode} pending={_landing_transition_pending}"
+    )
+
+    if new_mode == 1:
+        _finalize_landing_after_walking(obj, "K2")
+
+
+@hook("/Script/Engine.CharacterMovementComponent:SetMovementMode", Type.POST)
+def _movement_component_mode_changed(
+    obj: UObject,
+    args: WrappedStruct,
+    _ret: Any,
+    _func: BoundFunction,
+) -> None:
+    pawn = _get_current_pawn()
+    if pawn is None:
         return
 
-    _landing_transition_pending = False
+    movement = _get_move_component(pawn)
+    if not _same_uobject(obj, movement):
+        return
 
-    slide_requested = False
-    if bool(slide_from_landing_option.value) and _landing_crouch_pending:
-        try:
-            obj.SetWantsToSlide(True)
-            slide_requested = True
-            logging.warning(
-                "[SnappyMovement test] Slide from Landing requested after K2 MOVE_Walking"
-            )
-        except Exception as exc:
-            _error(f"Slide from Landing: failed to request native slide: {exc}")
+    try:
+        new_mode_raw = args.NewMovementMode
+        new_mode = int(getattr(new_mode_raw, "value", new_mode_raw))
+    except Exception:
+        return
 
-    _landing_crouch_pending = False
+    logging.warning(
+        "[SnappyMovement test] movement component mode "
+        f"new={new_mode} pending={_landing_transition_pending}"
+    )
 
-    if not slide_requested:
-        restored = _restore_remembered_sprint(obj, "K2 MOVE_Walking")
-        logging.warning(
-            "[SnappyMovement test] landing finalized "
-            f"remember_restored={restored}"
-        )
+    if new_mode == 1:
+        _finalize_landing_after_walking(pawn, "SetMovementMode")
 
 
 @hook("/Script/OakGame.OakCharacter:SetWantsToSlide", Type.POST)
@@ -586,6 +664,8 @@ def _set_wants_to_slide(
     _ret: Any,
     _func: BoundFunction,
 ) -> None:
+    global _air_slide_intent
+
     if not _same_uobject(obj, _get_current_pawn()):
         return
 
@@ -594,10 +674,19 @@ def _set_wants_to_slide(
     except Exception:
         return
 
+    falling = _is_falling(obj)
+    logging.warning(
+        "[SnappyMovement test] SetWantsToSlide "
+        f"requested={requested} falling={falling}"
+    )
+
+    if bool(slide_from_landing_option.value) and falling:
+        _air_slide_intent = requested
+
     if requested:
         return
 
-    if _resume_sprint_after_landing and not _is_falling(obj) and not _is_sliding(obj):
+    if _resume_sprint_after_landing and not falling and not _is_sliding(obj):
         _restore_remembered_sprint(obj, "slide")
 
 
