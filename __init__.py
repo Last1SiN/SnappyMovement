@@ -425,6 +425,11 @@ def _set_wants_to_sprint(
     global _sprint_chain_armed
     global _resume_sprint_after_landing
 
+    logging.warning(
+        "[SnappyMovement raw] SetWantsToSprint "
+        f"obj={_path(obj)!r} current={_path(_get_current_pawn())!r}"
+    )
+
     if _restoring_sprint or not _same_uobject(obj, _get_current_pawn()):
         return
 
@@ -500,6 +505,11 @@ def _on_jumped(
     global _resume_sprint_after_landing
     global _landing_crouch_pending
 
+    logging.warning(
+        "[SnappyMovement raw] OnJumped "
+        f"obj={_path(obj)!r} current={_path(_get_current_pawn())!r}"
+    )
+
     if not _same_uobject(obj, _get_current_pawn()):
         return
 
@@ -539,6 +549,11 @@ def _on_landed_post(
 ) -> None:
     global _landing_crouch_pending
     global _landing_transition_pending
+
+    logging.warning(
+        "[SnappyMovement raw] OnLanded "
+        f"obj={_path(obj)!r} current={_path(_get_current_pawn())!r}"
+    )
 
     if not _same_uobject(obj, _get_current_pawn()):
         return
@@ -665,6 +680,11 @@ def _set_wants_to_slide(
     _func: BoundFunction,
 ) -> None:
     global _air_slide_intent
+
+    logging.warning(
+        "[SnappyMovement raw] SetWantsToSlide "
+        f"obj={_path(obj)!r} current={_path(_get_current_pawn())!r}"
+    )
 
     if not _same_uobject(obj, _get_current_pawn()):
         return
@@ -858,11 +878,42 @@ def _sanitize_loaded_settings(mod_obj: Mod) -> None:
             _error(f"could not persist corrected settings: {exc}")
 
 
+HOOKS = (
+    _set_wants_to_sprint,
+    _on_start_sprinting,
+    _on_end_sprinting,
+    _on_jumped,
+    _on_landed_post,
+    _movement_mode_changed,
+    _movement_component_mode_changed,
+    _set_wants_to_slide,
+    _client_restart,
+)
+
 mod = build_mod(
     options=OPTIONS,
+    hooks=HOOKS,
     on_enable=_on_enable,
     on_disable=_on_disable,
 )
+
+for _hook_obj in HOOKS:
+    try:
+        _expected = len(_hook_obj.hook_funcs)
+        _active = _hook_obj.get_active_count()
+        if mod.is_enabled and _active != _expected:
+            _hook_obj.enable()
+            _active = _hook_obj.get_active_count()
+        logging.warning(
+            "[SnappyMovement hookcheck] "
+            f"name={_hook_obj.__name__} active={_active}/{_expected}"
+        )
+    except Exception as exc:
+        logging.error(
+            "[SnappyMovement hookcheck] "
+            f"name={getattr(_hook_obj, '__name__', '<unknown>')} "
+            f"error={type(exc).__name__}:{exc}"
+        )
 
 # build_mod() loads persisted settings before returning. Attach callbacks afterwards so loading
 # old settings does not accidentally turn a saved preset into Custom.
