@@ -1,0 +1,154 @@
+name: Temporary SnappyMovement crouch slide modes v1.2.0
+
+on:
+  push:
+    branches:
+      - feature-crouch-slide-modes-v1.2.0
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate crouch slide modes and package
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import ast, hashlib, tomllib, zipfile
+
+          source = Path("__init__.py")
+          text = source.read_text(encoding="utf-8")
+          tree = ast.parse(text, filename=str(source))
+          compile(text, str(source), "exec")
+
+          required = (
+              'from mods_base import BoolOption, Game, HiddenOption',
+              'CROUCH_SLIDE_OFF = "Off"',
+              'CROUCH_SLIDE_HOLD = "Slide on Crouch Hold"',
+              'CROUCH_SLIDE_TAP = "Slide on Crouch Tap"',
+              'legacy_slide_from_landing_option = HiddenOption(',
+              'identifier="slide_from_landing"',
+              'crouch_slide_mode_option = SpinnerOption(',
+              '"crouch_slide_mode"',
+              'list(CROUCH_SLIDE_MODES)',
+              'def _crouch_slide_mode() -> str:',
+              'def _should_slide_from_landing(pawn: UObject | None) -> bool:',
+              'if mode == CROUCH_SLIDE_HOLD:',
+              'return bool(_crouch_input_held or _wants_crouch(pawn) or _air_slide_intent)',
+              'if mode == CROUCH_SLIDE_TAP:',
+              'return bool(_air_crouch_tap_pending)',
+              'if _is_falling(pawn):',
+              '_air_crouch_tap_pending = True',
+              'if isinstance(legacy_slide, bool):',
+              'crouch_slide_mode_option.value = CROUCH_SLIDE_HOLD',
+              'legacy_slide_from_landing_option.value = None',
+              'pawn.SetWantsToSlide(True)',
+              'get_pc(possibly_loading=True)',
+              '@hook(_GBX_DISCRETE_ACTION_HOOK, Type.POST)',
+              'hooks=HOOKS',
+          )
+          for needle in required:
+              assert needle in text, needle
+
+          for forbidden in (
+              "_CROUCH_INPUT_FN_6",
+              "WillowGame.WillowPlayerController:PlayerTick",
+              "OakGame.OakPlayerController:PlayerTick",
+              "GameViewportClient:Tick",
+              "OakPlayerController:InputKey",
+              "Velocity =",
+              "MaxWalkSpeed =",
+              "MaxSprintSpeed =",
+              "def _on_landed_pre",
+          ):
+              assert forbidden not in text, forbidden
+
+          # Release clears held state but must preserve Tap latch until landing/reset/flush.
+          release_start = text.index("elif function_path.endswith(_CROUCH_INPUT_FN_5):")
+          release_end = text.index("    else:", release_start)
+          release_block = text[release_start:release_end]
+          assert "_crouch_input_held = False" in release_block
+          assert "_air_crouch_tap_pending = False" not in release_block
+
+          # Tap can only arm behind the falling gate.
+          pressed_start = text.index("if function_path.endswith(_CROUCH_INPUT_FN_4):")
+          pressed_end = text.index("elif function_path.endswith(_CROUCH_INPUT_FN_5):", pressed_start)
+          pressed_block = text[pressed_start:pressed_end]
+          assert "if _is_falling(pawn):" in pressed_block
+          assert "_air_crouch_tap_pending = True" in pressed_block
+
+          # Old boolean survives only as a hidden migration source.
+          assert text.count('identifier="slide_from_landing"') == 1
+          assert text.count('"crouch_slide_mode"') == 1
+          assert "legacy_slide_from_landing_option," in text
+          assert "crouch_slide_mode_option," in text
+
+          assert text.count("@hook(") == 10
+          assert text.count("add_hook(") == 1
+          assert text.count("pawn.SetWantsToSprint(True)") == 1
+          assert text.count("pawn.SetWantsToSlide(True)") == 1
+          assert text.count("_air_crouch_tap_pending = True") == 1
+
+          hooks_tuple = None
+          for node in tree.body:
+              if isinstance(node, ast.Assign) and any(
+                  isinstance(t, ast.Name) and t.id == "HOOKS" for t in node.targets
+              ):
+                  hooks_tuple = node.value
+                  break
+          assert isinstance(hooks_tuple, ast.Tuple)
+          names = [elt.id for elt in hooks_tuple.elts if isinstance(elt, ast.Name)]
+          assert names == [
+              "_set_wants_to_sprint",
+              "_on_start_sprinting",
+              "_on_end_sprinting",
+              "_on_jumped",
+              "_on_landed_post",
+              "_movement_mode_changed",
+              "_movement_component_mode_changed",
+              "_set_wants_to_slide",
+              "_gbx_discrete_action_probe",
+              "_client_restart",
+          ], names
+
+          meta = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+          version = meta["project"]["version"]
+          assert version == meta["tool"]["sdkmod"]["version"] == "1.2.0"
+          assert tuple(int(x) for x in version.split(".")) == (1, 2, 0)
+
+          stage = Path("stage/SnappyMovement")
+          stage.mkdir(parents=True, exist_ok=True)
+          for name in ("__init__.py","pyproject.toml","README.md","README_RU.md","LICENSE","ADDITIONAL_TERMS.md"):
+              (stage/name).write_bytes(Path(name).read_bytes())
+
+          archive = Path("dist/SnappyMovement.sdkmod")
+          archive.parent.mkdir(exist_ok=True)
+          with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+              for path in sorted(stage.rglob("*")):
+                  if path.is_file():
+                      zf.write(path, path.relative_to(stage.parent).as_posix())
+
+          with zipfile.ZipFile(archive) as zf:
+              names = [n for n in zf.namelist() if n and not n.endswith("/")]
+              assert {n.split("/", 1)[0] for n in names} == {"SnappyMovement"}
+              assert len(names) == 6
+              assert "SnappyMovement/__init__.py" in names
+              assert not any("__pycache__" in n or n.endswith((".pyc",".pyo")) for n in names)
+
+          print("source_sha256", hashlib.sha256(source.read_bytes()).hexdigest())
+          print("artifact_sha256", hashlib.sha256(archive.read_bytes()).hexdigest())
+          print("CROUCH_SLIDE_MODES_V120_GATES_PASS")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SnappyMovement-crouch-slide-modes-v1.2.0
+          path: dist/SnappyMovement.sdkmod
+          if-no-files-found: error
