@@ -106,6 +106,7 @@ _restoring_sprint = False
 _landing_crouch_pending = False
 _landing_transition_pending = False
 _air_slide_intent = False
+_crouch_input_held = False
 
 _CROUCH_INPUT_FN_4 = (
     "GbxInpActEvt_InputAction_Discrete_Crouch_"
@@ -116,7 +117,7 @@ _CROUCH_INPUT_FN_5 = (
     "K2Node_GbxInputActionEvent_Discrete_5"
 )
 _CROUCH_FLUSH_FN = "FlushCrouchInput"
-_CROUCH_DYNAMIC_ID_PREFIX = "snappymovement:crouch-input-diag:v1.1.8"
+_CROUCH_DYNAMIC_ID_PREFIX = "snappymovement:crouch-input-diag:v1.1.9"
 _crouch_dynamic_hooks: list[tuple[str, str]] = []
 
 _GBX_DISCRETE_ACTION_HOOK = "/Script/GbxInput.GbxInputComponent:StartInputAction_Discrete_Impl"
@@ -518,12 +519,26 @@ def _log_crouch_binding_metadata(cls: UObject) -> bool:
     return matches > 0
 
 
+def _ability_belongs_to_pawn(ability: UObject, pawn: UObject | None) -> bool:
+    if pawn is None:
+        return False
+
+    ability_path = _path(ability)
+    pawn_path = _path(pawn)
+    if ability_path.startswith("<") or pawn_path.startswith("<"):
+        return False
+
+    return ability_path.startswith(f"{pawn_path}.")
+
+
 def _crouch_probe_callback(
     obj: UObject,
     args: WrappedStruct,
     _ret: Any,
     func: BoundFunction,
 ) -> None:
+    global _crouch_input_held
+
     pawn = _get_current_pawn()
     movement = _get_move_component(pawn) if pawn is not None else None
 
@@ -538,10 +553,15 @@ def _crouch_probe_callback(
         action_name = "<unreadable>"
 
     function_path = _bound_function_path(func)
+    local_context = _ability_belongs_to_pawn(obj, pawn)
     if function_path.endswith(_CROUCH_INPUT_FN_4):
         input_event = "IE_Pressed"
+        if local_context:
+            _crouch_input_held = True
     elif function_path.endswith(_CROUCH_INPUT_FN_5):
         input_event = "IE_Released"
+        if local_context:
+            _crouch_input_held = False
     else:
         input_event = "<unknown>"
 
@@ -552,7 +572,9 @@ def _crouch_probe_callback(
         f"ability={_path(obj)!r} "
         f"action={_path(action)!r} action_name={action_name!r} "
         f"pawn={_path(pawn)!r} "
+        f"local_context={local_context} "
         f"falling={_is_falling(pawn)} "
+        f"held={_crouch_input_held} "
         f"wants_crouch={_wants_crouch(pawn)} "
         f"wants_slide={_movement_flag(movement, 'bWantsToSlide')}"
     )
@@ -564,14 +586,22 @@ def _crouch_flush_probe(
     _ret: Any,
     func: BoundFunction,
 ) -> None:
+    global _crouch_input_held
+
     pawn = _get_current_pawn()
     movement = _get_move_component(pawn) if pawn is not None else None
+    local_context = _ability_belongs_to_pawn(obj, pawn)
+    if local_context:
+        _crouch_input_held = False
+
     logging.warning(
         "[SnappyMovement crouchdiag] flush "
         f"func={_bound_function_path(func)!r} "
         f"ability={_path(obj)!r} "
         f"pawn={_path(pawn)!r} "
+        f"local_context={local_context} "
         f"falling={_is_falling(pawn)} "
+        f"held={_crouch_input_held} "
         f"wants_crouch={_wants_crouch(pawn)} "
         f"wants_slide={_movement_flag(movement, 'bWantsToSlide')}"
     )
@@ -677,6 +707,7 @@ def _reset_flow_state() -> None:
     global _landing_crouch_pending
     global _landing_transition_pending
     global _air_slide_intent
+    global _crouch_input_held
 
     _sprint_chain_armed = False
     _resume_sprint_after_landing = False
@@ -684,6 +715,7 @@ def _reset_flow_state() -> None:
     _landing_crouch_pending = False
     _landing_transition_pending = False
     _air_slide_intent = False
+    _crouch_input_held = False
 
 
 def _restore_remembered_sprint(pawn: UObject | None, reason: str) -> bool:
@@ -893,12 +925,13 @@ def _on_landed_post(
 
     _landing_transition_pending = True
     _landing_crouch_pending = bool(slide_from_landing_option.value) and (
-        _wants_crouch(obj) or _air_slide_intent
+        _crouch_input_held or _wants_crouch(obj) or _air_slide_intent
     )
 
     logging.warning(
         "[SnappyMovement test] landing captured POST "
         f"crouch={_landing_crouch_pending} "
+        f"crouch_held={_crouch_input_held} "
         f"air_slide_intent={_air_slide_intent} "
         f"remember_pending={_resume_sprint_after_landing}"
     )
