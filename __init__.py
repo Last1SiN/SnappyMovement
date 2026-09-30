@@ -4,7 +4,7 @@ import math
 from typing import Any
 
 import unrealsdk
-from mods_base import BoolOption, Game, Mod, SliderOption, SpinnerOption, build_mod, get_pc, hook
+from mods_base import BoolOption, Game, HiddenOption, Mod, SliderOption, SpinnerOption, build_mod, get_pc, hook
 from unrealsdk import logging
 from unrealsdk.hooks import Type, add_hook, remove_hook
 from unrealsdk.unreal import BoundFunction, UObject, WrappedStruct
@@ -15,6 +15,15 @@ PROFILE_SOFT = "Soft (8000 / 10000)"
 PROFILE_NEAR = "Near Instant (30000 / 40000)"
 PROFILE_INSTANT = "Instant (100000 / 120000)"
 PROFILE_CUSTOM = "Custom"
+
+CROUCH_SLIDE_OFF = "Off"
+CROUCH_SLIDE_HOLD = "Slide on Crouch Hold"
+CROUCH_SLIDE_TAP = "Slide on Crouch Tap"
+CROUCH_SLIDE_MODES = (
+    CROUCH_SLIDE_OFF,
+    CROUCH_SLIDE_HOLD,
+    CROUCH_SLIDE_TAP,
+)
 
 PRESETS: dict[str, tuple[float, float]] = {
     PROFILE_SOFT: (8000.0, 10000.0),
@@ -79,13 +88,22 @@ remember_sprint_option = BoolOption(
     ),
 )
 
-slide_from_landing_option = BoolOption(
+legacy_slide_from_landing_option = HiddenOption(
     identifier="slide_from_landing",
-    value=False,
-    display_name="Slide from Landing",
+    value=None,
+)
+
+crouch_slide_mode_option = SpinnerOption(
+    "crouch_slide_mode",
+    CROUCH_SLIDE_OFF,
+    list(CROUCH_SLIDE_MODES),
+    wrap_enabled=False,
+    display_name="Crouch Landing Slide",
     description=(
-        "If crouch is still held as you land, asks the game to start its native slide "
-        "instead of requiring another crouch press."
+        "Off: no automatic slide on landing. "
+        "Slide on Crouch Hold: slide only if crouch is still held at landing. "
+        "Slide on Crouch Tap: pressing crouch while airborne arms a slide for the next landing, "
+        "even if crouch is released before touching the ground."
     ),
 )
 
@@ -94,7 +112,8 @@ OPTIONS = (
     accel_option,
     brake_option,
     remember_sprint_option,
-    slide_from_landing_option,
+    legacy_slide_from_landing_option,
+    crouch_slide_mode_option,
 )
 
 _syncing_options = False
@@ -107,6 +126,7 @@ _landing_crouch_pending = False
 _landing_transition_pending = False
 _air_slide_intent = False
 _crouch_input_held = False
+_air_crouch_tap_pending = False
 
 _CROUCH_INPUT_FN_4 = (
     "GbxInpActEvt_InputAction_Discrete_Crouch_"
@@ -117,7 +137,7 @@ _CROUCH_INPUT_FN_5 = (
     "K2Node_GbxInputActionEvent_Discrete_5"
 )
 _CROUCH_FLUSH_FN = "FlushCrouchInput"
-_CROUCH_DYNAMIC_ID_PREFIX = "snappymovement:crouch-input-diag:v1.1.9"
+_CROUCH_DYNAMIC_ID_PREFIX = "snappymovement:crouch-input-diag:v1.2.0"
 _crouch_dynamic_hooks: list[tuple[str, str]] = []
 
 _GBX_DISCRETE_ACTION_HOOK = "/Script/GbxInput.GbxInputComponent:StartInputAction_Discrete_Impl"
@@ -538,6 +558,7 @@ def _crouch_probe_callback(
     func: BoundFunction,
 ) -> None:
     global _crouch_input_held
+    global _air_crouch_tap_pending
 
     pawn = _get_current_pawn()
     movement = _get_move_component(pawn) if pawn is not None else None
@@ -558,6 +579,8 @@ def _crouch_probe_callback(
         input_event = "IE_Pressed"
         if local_context:
             _crouch_input_held = True
+            if _is_falling(pawn):
+                _air_crouch_tap_pending = True
     elif function_path.endswith(_CROUCH_INPUT_FN_5):
         input_event = "IE_Released"
         if local_context:
@@ -575,6 +598,7 @@ def _crouch_probe_callback(
         f"local_context={local_context} "
         f"falling={_is_falling(pawn)} "
         f"held={_crouch_input_held} "
+        f"tap_pending={_air_crouch_tap_pending} "
         f"wants_crouch={_wants_crouch(pawn)} "
         f"wants_slide={_movement_flag(movement, 'bWantsToSlide')}"
     )
@@ -587,12 +611,14 @@ def _crouch_flush_probe(
     func: BoundFunction,
 ) -> None:
     global _crouch_input_held
+    global _air_crouch_tap_pending
 
     pawn = _get_current_pawn()
     movement = _get_move_component(pawn) if pawn is not None else None
     local_context = _ability_belongs_to_pawn(obj, pawn)
     if local_context:
         _crouch_input_held = False
+        _air_crouch_tap_pending = False
 
     logging.warning(
         "[SnappyMovement crouchdiag] flush "
@@ -602,6 +628,7 @@ def _crouch_flush_probe(
         f"local_context={local_context} "
         f"falling={_is_falling(pawn)} "
         f"held={_crouch_input_held} "
+        f"tap_pending={_air_crouch_tap_pending} "
         f"wants_crouch={_wants_crouch(pawn)} "
         f"wants_slide={_movement_flag(movement, 'bWantsToSlide')}"
     )
@@ -708,6 +735,7 @@ def _reset_flow_state() -> None:
     global _landing_transition_pending
     global _air_slide_intent
     global _crouch_input_held
+    global _air_crouch_tap_pending
 
     _sprint_chain_armed = False
     _resume_sprint_after_landing = False
@@ -716,6 +744,23 @@ def _reset_flow_state() -> None:
     _landing_transition_pending = False
     _air_slide_intent = False
     _crouch_input_held = False
+    _air_crouch_tap_pending = False
+
+
+def _crouch_slide_mode() -> str:
+    mode = str(crouch_slide_mode_option.value)
+    if mode in CROUCH_SLIDE_MODES:
+        return mode
+    return CROUCH_SLIDE_OFF
+
+
+def _should_slide_from_landing(pawn: UObject | None) -> bool:
+    mode = _crouch_slide_mode()
+    if mode == CROUCH_SLIDE_HOLD:
+        return bool(_crouch_input_held or _wants_crouch(pawn) or _air_slide_intent)
+    if mode == CROUCH_SLIDE_TAP:
+        return bool(_air_crouch_tap_pending)
+    return False
 
 
 def _restore_remembered_sprint(pawn: UObject | None, reason: str) -> bool:
@@ -758,7 +803,7 @@ def _on_enable() -> None:
     logging.warning(
         "[SnappyMovement test] enabled "
         f"remember_sprint={bool(remember_sprint_option.value)} "
-        f"slide_from_landing={bool(slide_from_landing_option.value)} "
+        f"crouch_slide_mode={_crouch_slide_mode()!r} "
         f"controller={_path(controller)!r} pawn={_path(pawn)!r}"
     )
     try:
@@ -868,6 +913,7 @@ def _on_jumped(
 ) -> None:
     global _resume_sprint_after_landing
     global _landing_crouch_pending
+    global _air_crouch_tap_pending
 
     logging.warning(
         "[SnappyMovement raw] OnJumped "
@@ -879,6 +925,7 @@ def _on_jumped(
         return
 
     _landing_crouch_pending = False
+    _air_crouch_tap_pending = False
 
     if not bool(remember_sprint_option.value):
         _resume_sprint_after_landing = False
@@ -924,14 +971,15 @@ def _on_landed_post(
         return
 
     _landing_transition_pending = True
-    _landing_crouch_pending = bool(slide_from_landing_option.value) and (
-        _crouch_input_held or _wants_crouch(obj) or _air_slide_intent
-    )
+    mode = _crouch_slide_mode()
+    _landing_crouch_pending = _should_slide_from_landing(obj)
 
     logging.warning(
         "[SnappyMovement test] landing captured POST "
+        f"mode={mode!r} "
         f"crouch={_landing_crouch_pending} "
         f"crouch_held={_crouch_input_held} "
+        f"tap_pending={_air_crouch_tap_pending} "
         f"air_slide_intent={_air_slide_intent} "
         f"remember_pending={_resume_sprint_after_landing}"
     )
@@ -941,6 +989,7 @@ def _finalize_landing_after_walking(pawn: UObject | None, source: str) -> None:
     global _landing_crouch_pending
     global _landing_transition_pending
     global _air_slide_intent
+    global _air_crouch_tap_pending
 
     if pawn is None or not _landing_transition_pending:
         return
@@ -961,7 +1010,7 @@ def _finalize_landing_after_walking(pawn: UObject | None, source: str) -> None:
     _landing_transition_pending = False
 
     slide_requested = False
-    if bool(slide_from_landing_option.value) and _landing_crouch_pending:
+    if _crouch_slide_mode() != CROUCH_SLIDE_OFF and _landing_crouch_pending:
         try:
             pawn.SetWantsToSlide(True)
             slide_requested = True
@@ -974,6 +1023,7 @@ def _finalize_landing_after_walking(pawn: UObject | None, source: str) -> None:
 
     _landing_crouch_pending = False
     _air_slide_intent = False
+    _air_crouch_tap_pending = False
 
     if not slide_requested:
         restored = _restore_remembered_sprint(pawn, f"{source} MOVE_Walking")
@@ -1066,7 +1116,7 @@ def _set_wants_to_slide(
         f"requested={requested} falling={falling}"
     )
 
-    if bool(slide_from_landing_option.value) and falling:
+    if falling:
         _air_slide_intent = requested
 
     if requested:
@@ -1192,9 +1242,22 @@ def _sanitize_loaded_settings(mod_obj: Mod) -> None:
 
     corrected = False
     profile = str(profile_option.value)
+    crouch_mode = str(crouch_slide_mode_option.value)
+    legacy_slide = legacy_slide_from_landing_option.value
 
     _syncing_options = True
     try:
+        if crouch_mode not in CROUCH_SLIDE_MODES:
+            crouch_slide_mode_option.value = CROUCH_SLIDE_OFF
+            crouch_mode = CROUCH_SLIDE_OFF
+            corrected = True
+
+        if isinstance(legacy_slide, bool):
+            if legacy_slide and crouch_mode == CROUCH_SLIDE_OFF:
+                crouch_slide_mode_option.value = CROUCH_SLIDE_HOLD
+            legacy_slide_from_landing_option.value = None
+            corrected = True
+
         if profile in PRESETS:
             expected_accel, expected_brake = PRESETS[profile]
 
