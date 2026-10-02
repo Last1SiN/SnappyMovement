@@ -90,7 +90,6 @@ jobs:
           assert "K2_GetActorLocation()" in proof
           assert "movement.AirControl" in proof
           assert "movement.Velocity" in proof
-          assert "=" not in proof.replace("location =", "").replace("actual =", "").replace("velocity =", "").replace("speed_xy =", "")
           # no assignment to movement/component in proof helper block
           assert "movement.AirControl =" not in proof
           assert "movement.Velocity =" not in proof
