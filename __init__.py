@@ -205,6 +205,9 @@ _air_crouch_tap_pending = False
 _auto_sprint_applying = False
 _walk_override_active = False
 _move_input_active = False
+_move_probe_logged = False
+
+_PLAYER_MOVE_HOOK = "/Script/OakGame.OakInputAbility_Player_Common:PlayerMove"
 
 _CROUCH_INPUT_FN_4 = (
     "GbxInpActEvt_InputAction_Discrete_Crouch_"
@@ -505,13 +508,21 @@ def _apply_air_control_override(
         "Air Control",
     )
     try:
+        before = float(component.AirControl)
         component.AirControl = target
+        after = float(component.AirControl)
     except Exception as exc:
         if report_failure:
             _error(f"failed to reapply Air Control to {_path(component)}: {exc}")
         return False
 
-    return True
+    if abs(before - target) > 0.001:
+        logging.warning(
+            "[SnappyMovement airfix] "
+            f"reapplied AirControl from={before:.3f} target={target:.3f} actual={after:.3f}"
+        )
+
+    return abs(after - target) <= 0.001
 
 
 def _restore_all() -> None:
@@ -872,7 +883,7 @@ def _sprint_input_post(
         _apply_auto_sprint_intent(pawn)
 
 
-@hook("/Script/OakGame.OakInputAbility_Player_Common:PlayerMove", Type.POST)
+@hook(_PLAYER_MOVE_HOOK, Type.POST)
 def _player_move(
     obj: UObject,
     args: WrappedStruct,
@@ -880,6 +891,7 @@ def _player_move(
     _func: BoundFunction,
 ) -> None:
     global _move_input_active
+    global _move_probe_logged
 
     if not bool(auto_sprint_option.value):
         _move_input_active = False
@@ -904,6 +916,13 @@ def _player_move(
         return
 
     _move_input_active = True
+    if not _move_probe_logged:
+        logging.warning(
+            "[SnappyMovement moveprobe] "
+            f"PlayerMove local callback magnitude_sq={magnitude_sq:.4f}"
+        )
+        _move_probe_logged = True
+
     if not _walk_override_active:
         _apply_auto_sprint_intent(pawn)
 
@@ -969,6 +988,7 @@ def _reset_flow_state() -> None:
     global _auto_sprint_applying
     global _walk_override_active
     global _move_input_active
+    global _move_probe_logged
 
     _sprint_chain_armed = False
     _resume_sprint_after_landing = False
@@ -981,6 +1001,7 @@ def _reset_flow_state() -> None:
     _auto_sprint_applying = False
     _walk_override_active = False
     _move_input_active = False
+    _move_probe_logged = False
 
 
 def _crouch_slide_mode() -> str:
@@ -1039,6 +1060,22 @@ def _on_enable() -> None:
     _apply_current_values()
     _install_crouch_dynamic_hooks()
     _install_sprint_dynamic_hooks()
+
+    try:
+        target_found = unrealsdk.find_object("Function", _PLAYER_MOVE_HOOK) is not None
+    except Exception:
+        target_found = False
+    try:
+        active = _player_move.get_active_count()
+        expected = len(_player_move.hook_funcs)
+    except Exception:
+        active = -1
+        expected = -1
+    logging.warning(
+        "[SnappyMovement moveprobe] "
+        f"target={_PLAYER_MOVE_HOOK!r} found={target_found} active={active}/{expected}"
+    )
+
     _apply_auto_sprint_intent(_get_current_pawn())
 
 
@@ -1150,6 +1187,7 @@ def _on_jumped(
 
     _landing_crouch_pending = False
     _air_crouch_tap_pending = False
+    _apply_air_control_override(obj)
 
     if bool(auto_sprint_option.value) or not bool(remember_sprint_option.value):
         _resume_sprint_after_landing = False
