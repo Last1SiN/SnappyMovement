@@ -205,9 +205,14 @@ _crouch_input_held = False
 _air_crouch_tap_pending = False
 _auto_sprint_applying = False
 _walk_override_active = False
-_airproof_start_xy: tuple[float, float] | None = None
-_airproof_start_speed = 0.0
-_airproof_start_value: float | None = None
+_airresponse_active = False
+_airresponse_elapsed = 0.0
+_airresponse_motion_t: float | None = None
+_airresponse_samples: list[tuple[float, float]] = []
+_airresponse_target: float | None = None
+_airresponse_actual: float | None = None
+_airresponse_max_accel: float | None = None
+_airresponse_original_accel: float | None = None
 _CROUCH_INPUT_FN_4 = (
     "GbxInpActEvt_InputAction_Discrete_Crouch_"
     "K2Node_GbxInputActionEvent_Discrete_4"
@@ -217,10 +222,10 @@ _CROUCH_INPUT_FN_5 = (
     "K2Node_GbxInputActionEvent_Discrete_5"
 )
 _CROUCH_FLUSH_FN = "FlushCrouchInput"
-_CROUCH_DYNAMIC_ID_PREFIX = "snappymovement:crouch-input:v1.3.6"
+_CROUCH_DYNAMIC_ID_PREFIX = "snappymovement:crouch-input:v1.3.7"
 _crouch_dynamic_hooks: list[tuple[str, str]] = []
 
-_SPRINT_DYNAMIC_ID_PREFIX = "snappymovement:sprint-input:v1.3.6"
+_SPRINT_DYNAMIC_ID_PREFIX = "snappymovement:sprint-input:v1.3.7"
 _sprint_dynamic_hooks: list[tuple[str, Type, str]] = []
 _sprint_event_by_path: dict[str, str] = {}
 
@@ -605,23 +610,15 @@ def _wants_crouch(pawn: UObject | None) -> bool:
     return _movement_bool(pawn, "GetWantsToCrouch")
 
 
-def _airproof_actor_xy(pawn: UObject | None) -> tuple[float, float] | None:
+def _airresponse_movement_state(
+    pawn: UObject | None,
+) -> tuple[float | None, float | None, float | None]:
     if pawn is None:
-        return None
-    try:
-        location = pawn.K2_GetActorLocation()
-        return float(location.X), float(location.Y)
-    except Exception:
-        return None
-
-
-def _airproof_state(pawn: UObject | None) -> tuple[float | None, float | None]:
-    if pawn is None:
-        return None, None
+        return None, None, None
 
     movement = _get_move_component(pawn)
     if movement is None:
-        return None, None
+        return None, None, None
 
     try:
         actual = float(movement.AirControl)
@@ -629,12 +626,40 @@ def _airproof_state(pawn: UObject | None) -> tuple[float | None, float | None]:
         actual = None
 
     try:
+        max_accel = float(movement.MaxAcceleration)
+    except Exception:
+        max_accel = None
+
+    try:
         velocity = movement.Velocity
         speed_xy = math.hypot(float(velocity.X), float(velocity.Y))
     except Exception:
         speed_xy = None
 
-    return actual, speed_xy
+    return actual, max_accel, speed_xy
+
+
+def _finish_airresponse(reason: str) -> None:
+    global _airresponse_active
+
+    if not _airresponse_active:
+        return
+
+    sample_text = ",".join(
+        f"{t * 1000.0:.1f}:{speed:.1f}"
+        for t, speed in _airresponse_samples
+    )
+    logging.warning(
+        "[SnappyMovement airresponse] "
+        f"reason={reason} "
+        f"target={_airresponse_target!r} "
+        f"actual={_airresponse_actual!r} "
+        f"max_accel={_airresponse_max_accel!r} "
+        f"original_accel={_airresponse_original_accel!r} "
+        f"motion_t={_airresponse_motion_t!r} "
+        f"samples_ms_speed=[{sample_text}]"
+    )
+    _airresponse_active = False
 
 
 def _bound_function_path(func: BoundFunction) -> str:
@@ -973,9 +998,14 @@ def _reset_flow_state() -> None:
     global _air_crouch_tap_pending
     global _auto_sprint_applying
     global _walk_override_active
-    global _airproof_start_xy
-    global _airproof_start_speed
-    global _airproof_start_value
+    global _airresponse_active
+    global _airresponse_elapsed
+    global _airresponse_motion_t
+    global _airresponse_samples
+    global _airresponse_target
+    global _airresponse_actual
+    global _airresponse_max_accel
+    global _airresponse_original_accel
 
     _sprint_chain_armed = False
     _resume_sprint_after_landing = False
@@ -987,9 +1017,14 @@ def _reset_flow_state() -> None:
     _air_crouch_tap_pending = False
     _auto_sprint_applying = False
     _walk_override_active = False
-    _airproof_start_xy = None
-    _airproof_start_speed = 0.0
-    _airproof_start_value = None
+    _airresponse_active = False
+    _airresponse_elapsed = 0.0
+    _airresponse_motion_t = None
+    _airresponse_samples = []
+    _airresponse_target = None
+    _airresponse_actual = None
+    _airresponse_max_accel = None
+    _airresponse_original_accel = None
 
 
 def _crouch_slide_mode() -> str:
@@ -1154,9 +1189,14 @@ def _on_jumped(
     global _resume_sprint_after_landing
     global _landing_crouch_pending
     global _air_crouch_tap_pending
-    global _airproof_start_xy
-    global _airproof_start_speed
-    global _airproof_start_value
+    global _airresponse_active
+    global _airresponse_elapsed
+    global _airresponse_motion_t
+    global _airresponse_samples
+    global _airresponse_target
+    global _airresponse_actual
+    global _airresponse_max_accel
+    global _airresponse_original_accel
 
     _install_crouch_dynamic_hooks()
     _install_sprint_dynamic_hooks()
@@ -1169,13 +1209,20 @@ def _on_jumped(
     _apply_air_control_override(obj)
 
     if bool(air_control_override_option.value):
-        _airproof_start_xy = _airproof_actor_xy(obj)
-        _airproof_start_value, start_speed = _airproof_state(obj)
-        _airproof_start_speed = float(start_speed or 0.0)
+        movement = _get_move_component(obj)
+        actual, max_accel, _speed_xy = _airresponse_movement_state(obj)
+        record = _remember_original(movement) if movement is not None else None
+
+        _airresponse_active = True
+        _airresponse_elapsed = 0.0
+        _airresponse_motion_t = None
+        _airresponse_samples = []
+        _airresponse_target = float(air_control_option.value)
+        _airresponse_actual = actual
+        _airresponse_max_accel = max_accel
+        _airresponse_original_accel = record[1] if record is not None else None
     else:
-        _airproof_start_xy = None
-        _airproof_start_value = None
-        _airproof_start_speed = 0.0
+        _airresponse_active = False
 
     if bool(auto_sprint_option.value) or not bool(remember_sprint_option.value):
         _resume_sprint_after_landing = False
@@ -1204,9 +1251,6 @@ def _on_landed_post(
 ) -> None:
     global _landing_crouch_pending
     global _landing_transition_pending
-    global _airproof_start_xy
-    global _airproof_start_speed
-    global _airproof_start_value
 
     if not _same_uobject(obj, _get_current_pawn()):
         return
@@ -1214,26 +1258,53 @@ def _on_landed_post(
     _landing_transition_pending = True
     _landing_crouch_pending = _should_slide_from_landing(obj)
 
-    if bool(air_control_override_option.value):
-        end_xy = _airproof_actor_xy(obj)
-        land_actual, end_speed = _airproof_state(obj)
-        if _airproof_start_xy is not None and end_xy is not None:
-            dx = end_xy[0] - _airproof_start_xy[0]
-            dy = end_xy[1] - _airproof_start_xy[1]
-            distance = math.hypot(dx, dy)
-            logging.warning(
-                "[SnappyMovement airproof] "
-                f"target={float(air_control_option.value):.3f} "
-                f"jump_actual={_airproof_start_value!r} "
-                f"land_actual={land_actual!r} "
-                f"start_speed_xy={_airproof_start_speed:.3f} "
-                f"end_speed_xy={end_speed!r} "
-                f"dx={dx:.3f} dy={dy:.3f} distance_xy={distance:.3f}"
-            )
+    if _airresponse_active:
+        _finish_airresponse("landed")
 
-    _airproof_start_xy = None
-    _airproof_start_value = None
-    _airproof_start_speed = 0.0
+
+@hook(
+    "/Game/PlayerCharacters/_Shared/_Design/Character/BPChar_Player.BPChar_Player_C:ReceiveTick",
+    Type.POST,
+)
+def _airresponse_tick(
+    obj: UObject,
+    args: WrappedStruct,
+    _ret: Any,
+    _func: BoundFunction,
+) -> None:
+    global _airresponse_elapsed
+    global _airresponse_motion_t
+    global _airresponse_samples
+
+    if not _airresponse_active or not _same_uobject(obj, _get_current_pawn()):
+        return
+
+    try:
+        delta = float(args.DeltaSeconds)
+    except Exception:
+        return
+    if delta <= 0.0 or delta > 0.25:
+        return
+
+    _airresponse_elapsed += delta
+    _actual, _max_accel, speed_xy = _airresponse_movement_state(obj)
+    if speed_xy is None:
+        return
+
+    if _airresponse_motion_t is None:
+        if speed_xy >= 1.0:
+            _airresponse_motion_t = _airresponse_elapsed
+            _airresponse_samples.append((0.0, speed_xy))
+        elif _airresponse_elapsed >= 0.50:
+            _finish_airresponse("no-horizontal-motion")
+        return
+
+    relative = _airresponse_elapsed - _airresponse_motion_t
+    if relative <= 0.15:
+        _airresponse_samples.append((relative, speed_xy))
+
+    if relative >= 0.15:
+        _finish_airresponse("150ms-window")
 
 
 def _finalize_landing_after_walking(pawn: UObject | None, source: str) -> None:
@@ -1532,21 +1603,6 @@ def _sanitize_loaded_settings(mod_obj: Mod) -> None:
             walk_override_option.value = WALK_OVERRIDE_HOLD
             corrected = True
 
-        safe_air_control = _safe_float_value(
-            air_control_option.value,
-            0.6,
-            AIR_CONTROL_MIN,
-            AIR_CONTROL_MAX,
-            "Air Control",
-        )
-        try:
-            current_air_control = float(air_control_option.value)
-        except (TypeError, ValueError):
-            current_air_control = float("nan")
-        if not math.isfinite(current_air_control) or current_air_control != safe_air_control:
-            air_control_option.value = safe_air_control
-            corrected = True
-
         if isinstance(legacy_slide, bool):
             if legacy_slide and crouch_mode == CROUCH_SLIDE_OFF:
                 crouch_slide_mode_option.value = CROUCH_SLIDE_HOLD
@@ -1604,6 +1660,7 @@ def _sanitize_loaded_settings(mod_obj: Mod) -> None:
 
 
 HOOKS = (
+    _airresponse_tick,
     _set_wants_to_sprint,
     _on_start_sprinting,
     _on_end_sprinting,
