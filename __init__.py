@@ -218,10 +218,10 @@ _CROUCH_INPUT_FN_5 = (
     "K2Node_GbxInputActionEvent_Discrete_5"
 )
 _CROUCH_FLUSH_FN = "FlushCrouchInput"
-_CROUCH_DYNAMIC_ID_PREFIX = "snappymovement:crouch-input:v1.3.10"
+_CROUCH_DYNAMIC_ID_PREFIX = "snappymovement:crouch-input:v1.3.11"
 _crouch_dynamic_hooks: list[tuple[str, str]] = []
 
-_SPRINT_DYNAMIC_ID_PREFIX = "snappymovement:sprint-input:v1.3.10"
+_SPRINT_DYNAMIC_ID_PREFIX = "snappymovement:sprint-input:v1.3.11"
 _sprint_dynamic_hooks: list[tuple[str, Type, str]] = []
 _sprint_event_by_path: dict[str, str] = {}
 
@@ -421,6 +421,9 @@ def _apply_to_pawn(
     acceleration: float,
     braking: float,
     *,
+    air_control_override: bool | None = None,
+    air_control_value: float | None = None,
+    any_direction_sprint: bool | None = None,
     report_failure: bool = False,
 ) -> None:
     if pawn is None:
@@ -438,6 +441,22 @@ def _apply_to_pawn(
 
     _, _old_accel, _old_brake, old_air_control, old_sprint_angle = record
 
+    air_control_enabled = (
+        bool(air_control_override_option.value)
+        if air_control_override is None
+        else bool(air_control_override)
+    )
+    requested_air_control = (
+        air_control_option.value
+        if air_control_value is None
+        else air_control_value
+    )
+    directional_sprint_enabled = (
+        bool(any_direction_sprint_option.value)
+        if any_direction_sprint is None
+        else bool(any_direction_sprint)
+    )
+
     try:
         component.MaxAcceleration = acceleration
         component.BrakingDecelerationWalking = braking
@@ -446,9 +465,9 @@ def _apply_to_pawn(
 
     if old_air_control is not None:
         target_air_control = old_air_control
-        if bool(air_control_override_option.value):
+        if air_control_enabled:
             target_air_control = _safe_float_value(
-                air_control_option.value,
+                requested_air_control,
                 AIR_CONTROL_DEFAULT,
                 AIR_CONTROL_MIN,
                 AIR_CONTROL_MAX,
@@ -457,29 +476,41 @@ def _apply_to_pawn(
         try:
             component.AirControl = target_air_control
         except Exception as exc:
-            if bool(air_control_override_option.value):
+            if air_control_enabled:
                 _error(f"failed to apply Air Control to {_path(component)}: {exc}")
-    elif bool(air_control_override_option.value) and report_failure:
+    elif air_control_enabled and report_failure:
         _error(f"Air Control is unavailable on {_path(component)}")
 
     if old_sprint_angle is not None:
         target_sprint_angle = (
             ANY_DIRECTION_SPRINT_ANGLE
-            if bool(any_direction_sprint_option.value)
+            if directional_sprint_enabled
             else old_sprint_angle
         )
         try:
             component.MaxSprintAngle = target_sprint_angle
         except Exception as exc:
-            if bool(any_direction_sprint_option.value):
+            if directional_sprint_enabled:
                 _error(f"failed to apply sprint angle to {_path(component)}: {exc}")
-    elif bool(any_direction_sprint_option.value) and report_failure:
+    elif directional_sprint_enabled and report_failure:
         _error(f"MaxSprintAngle is unavailable on {_path(component)}")
 
 
-def _apply_current_values() -> None:
+def _apply_current_values(
+    *,
+    air_control_override: bool | None = None,
+    air_control_value: float | None = None,
+    any_direction_sprint: bool | None = None,
+) -> None:
     acceleration, braking = _current_values()
-    _apply_to_pawn(_get_current_pawn(), acceleration, braking)
+    _apply_to_pawn(
+        _get_current_pawn(),
+        acceleration,
+        braking,
+        air_control_override=air_control_override,
+        air_control_value=air_control_value,
+        any_direction_sprint=any_direction_sprint,
+    )
 
 
 def _apply_air_control_override(pawn: UObject | None) -> bool:
@@ -787,8 +818,8 @@ def _find_action_bindings(
     return result
 
 
-def _walk_override_mode() -> str:
-    mode = str(walk_override_option.value)
+def _walk_override_mode(value: Any | None = None) -> str:
+    mode = str(walk_override_option.value if value is None else value)
     if mode in WALK_OVERRIDE_MODES:
         return mode
     return WALK_OVERRIDE_HOLD
@@ -943,12 +974,17 @@ def _install_sprint_dynamic_hooks() -> bool:
 def _sync_sprint_dynamic_hooks(
     pawn: UObject | None,
     *,
+    auto_sprint_enabled: bool | None = None,
+    walk_override_mode: str | None = None,
     report_failure: bool = False,
 ) -> bool:
-    needs_hooks = (
+    enabled = (
         bool(auto_sprint_option.value)
-        and _walk_override_mode() != WALK_OVERRIDE_DISABLED
+        if auto_sprint_enabled is None
+        else bool(auto_sprint_enabled)
     )
+    mode = _walk_override_mode(walk_override_mode)
+    needs_hooks = enabled and mode != WALK_OVERRIDE_DISABLED
     if not needs_hooks:
         _remove_sprint_dynamic_hooks()
         return True
@@ -1430,9 +1466,16 @@ def _on_brake_change(_option: SliderOption, new_value: float) -> None:
         _apply_to_pawn(_get_current_pawn(), acceleration, braking)
 
 
-def _on_movement_feature_change(_option: Any, _new_value: Any) -> None:
-    if mod.is_enabled:
-        _apply_current_values()
+def _on_movement_feature_change(option: Any, new_value: Any) -> None:
+    if not mod.is_enabled:
+        return
+
+    if option is air_control_override_option:
+        _apply_current_values(air_control_override=bool(new_value))
+    elif option is air_control_option:
+        _apply_current_values(air_control_value=float(new_value))
+    elif option is any_direction_sprint_option:
+        _apply_current_values(any_direction_sprint=bool(new_value))
 
 
 def _on_auto_sprint_change(_option: BoolOption, new_value: bool) -> None:
@@ -1447,15 +1490,19 @@ def _on_auto_sprint_change(_option: BoolOption, new_value: bool) -> None:
         return
 
     pawn = _get_current_pawn()
-    if bool(new_value):
-        _sync_sprint_dynamic_hooks(pawn, report_failure=True)
-        _apply_auto_sprint_intent(pawn)
+    enabled = bool(new_value)
+    _sync_sprint_dynamic_hooks(
+        pawn,
+        auto_sprint_enabled=enabled,
+        report_failure=True,
+    )
+    if enabled:
+        _set_auto_sprint_native_intent(pawn, not _walk_override_active)
     else:
-        _remove_sprint_dynamic_hooks()
         _release_auto_sprint(pawn)
 
 
-def _on_walk_override_change(_option: SpinnerOption, _new_value: str) -> None:
+def _on_walk_override_change(_option: SpinnerOption, new_value: str) -> None:
     global _walk_override_active
 
     _walk_override_active = False
@@ -1463,7 +1510,11 @@ def _on_walk_override_change(_option: SpinnerOption, _new_value: str) -> None:
         return
 
     pawn = _get_current_pawn()
-    _sync_sprint_dynamic_hooks(pawn, report_failure=True)
+    _sync_sprint_dynamic_hooks(
+        pawn,
+        walk_override_mode=new_value,
+        report_failure=True,
+    )
     if bool(auto_sprint_option.value):
         _apply_auto_sprint_intent(pawn)
 
