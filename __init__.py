@@ -59,7 +59,7 @@ profile_option = SpinnerOption(
     wrap_enabled=False,
     display_name="Profile",
     description=(
-        "Select one of the original v0.2 profiles or Custom. "
+        "Select one of the original v1.0 profiles or Custom. "
         "Changing either slider automatically switches the profile to Custom."
     ),
 )
@@ -75,7 +75,7 @@ accel_option = SliderOption(
     description=(
         "Controls how quickly ground movement reaches the game's normal maximum speed. "
         "Does not change MaxWalkSpeed or MaxSprintSpeed. "
-        "v0.2 presets: Soft 8000, Near Instant 30000, Instant 100000."
+        "v1.0 presets: Soft 8000, Near Instant 30000, Instant 100000."
     ),
 )
 
@@ -90,7 +90,7 @@ brake_option = SliderOption(
     description=(
         "Controls how quickly walking movement stops after movement input is released. "
         "GroundFriction is not modified. "
-        "v0.2 presets: Soft 10000, Near Instant 40000, Instant 120000."
+        "v1.0 presets: Soft 10000, Near Instant 40000, Instant 120000."
     ),
 )
 
@@ -317,8 +317,7 @@ def _find_local_controller() -> UObject | None:
         except Exception:
             pass
 
-    # Fallback only. find_all() alone is not reliable enough on BL3 and was the
-    # cause of feature hooks seeing current pawn as None in v1.1.0-v1.1.3.
+    # Fallback only. find_all() alone is not reliable enough for local-player ownership.
     try:
         controllers = unrealsdk.find_all("PlayerController", exact=False)
     except Exception:
