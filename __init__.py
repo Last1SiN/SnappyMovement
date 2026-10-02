@@ -204,6 +204,7 @@ _crouch_input_held = False
 _air_crouch_tap_pending = False
 _auto_sprint_applying = False
 _walk_override_active = False
+_move_input_active = False
 
 _CROUCH_INPUT_FN_4 = (
     "GbxInpActEvt_InputAction_Discrete_Crouch_"
@@ -476,6 +477,41 @@ def _apply_to_pawn(
 def _apply_current_values() -> None:
     acceleration, braking = _current_values()
     _apply_to_pawn(_get_current_pawn(), acceleration, braking)
+
+
+def _apply_air_control_override(
+    pawn: UObject | None,
+    *,
+    report_failure: bool = False,
+) -> bool:
+    if pawn is None or not bool(air_control_override_option.value):
+        return False
+
+    component = _get_move_component(pawn)
+    if component is None:
+        if report_failure:
+            _error(f"Air Control: movement component unavailable on {_path(pawn)}")
+        return False
+
+    record = _remember_original(component)
+    if record is None:
+        return False
+
+    target = _safe_float_value(
+        air_control_option.value,
+        1.0,
+        AIR_CONTROL_MIN,
+        AIR_CONTROL_MAX,
+        "Air Control",
+    )
+    try:
+        component.AirControl = target
+    except Exception as exc:
+        if report_failure:
+            _error(f"failed to reapply Air Control to {_path(component)}: {exc}")
+        return False
+
+    return True
 
 
 def _restore_all() -> None:
@@ -836,6 +872,42 @@ def _sprint_input_post(
         _apply_auto_sprint_intent(pawn)
 
 
+@hook("/Script/OakGame.OakInputAbility_Player_Common:PlayerMove", Type.POST)
+def _player_move(
+    obj: UObject,
+    args: WrappedStruct,
+    _ret: Any,
+    _func: BoundFunction,
+) -> None:
+    global _move_input_active
+
+    if not bool(auto_sprint_option.value):
+        _move_input_active = False
+        return
+
+    pawn = _get_current_pawn()
+    if not _ability_belongs_to_pawn(obj, pawn):
+        return
+
+    try:
+        value = args.Val
+        magnitude_sq = float(value.X) ** 2 + float(value.Y) ** 2
+    except Exception:
+        return
+
+    active = magnitude_sq > 0.0001
+    if not active:
+        _move_input_active = False
+        return
+
+    if _move_input_active:
+        return
+
+    _move_input_active = True
+    if not _walk_override_active:
+        _apply_auto_sprint_intent(pawn)
+
+
 def _remove_sprint_dynamic_hooks() -> None:
     global _sprint_dynamic_hooks
     global _sprint_event_by_path
@@ -896,6 +968,7 @@ def _reset_flow_state() -> None:
     global _air_crouch_tap_pending
     global _auto_sprint_applying
     global _walk_override_active
+    global _move_input_active
 
     _sprint_chain_armed = False
     _resume_sprint_after_landing = False
@@ -907,6 +980,7 @@ def _reset_flow_state() -> None:
     _air_crouch_tap_pending = False
     _auto_sprint_applying = False
     _walk_override_active = False
+    _move_input_active = False
 
 
 def _crouch_slide_mode() -> str:
@@ -1173,7 +1247,9 @@ def _movement_mode_changed(
         return
 
 
-    if new_mode == 1:
+    if new_mode == 3:
+        _apply_air_control_override(obj)
+    elif new_mode == 1:
         _finalize_landing_after_walking(obj, "K2")
 
 
@@ -1199,7 +1275,9 @@ def _movement_component_mode_changed(
         return
 
 
-    if new_mode == 1:
+    if new_mode == 3:
+        _apply_air_control_override(pawn)
+    elif new_mode == 1:
         _finalize_landing_after_walking(pawn, "SetMovementMode")
 
 
@@ -1360,8 +1438,10 @@ def _on_auto_sprint_change(_option: BoolOption, new_value: bool) -> None:
     global _walk_override_active
     global _sprint_chain_armed
     global _resume_sprint_after_landing
+    global _move_input_active
 
     _walk_override_active = False
+    _move_input_active = False
     _sprint_chain_armed = False
     _resume_sprint_after_landing = False
     if not mod.is_enabled:
@@ -1379,8 +1459,10 @@ def _on_auto_sprint_change(_option: BoolOption, new_value: bool) -> None:
 
 def _on_walk_override_change(_option: SpinnerOption, _new_value: str) -> None:
     global _walk_override_active
+    global _move_input_active
 
     _walk_override_active = False
+    _move_input_active = False
     if mod.is_enabled and bool(auto_sprint_option.value):
         _apply_auto_sprint_intent(_get_current_pawn())
 
@@ -1477,6 +1559,7 @@ def _sanitize_loaded_settings(mod_obj: Mod) -> None:
 
 
 HOOKS = (
+    _player_move,
     _set_wants_to_sprint,
     _on_start_sprinting,
     _on_end_sprinting,
