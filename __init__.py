@@ -208,6 +208,13 @@ _move_input_active = False
 _move_probe_logged = False
 
 _PLAYER_MOVE_HOOK = "/Script/OakGame.OakInputAbility_Player_Common:PlayerMove"
+_GBX_CONTINUOUS_VECTOR_HOOK = "/Script/GbxInput.GbxInputComponent:InputAction_Continuous_Vector_Impl"
+
+_move_action_name: str | None = None
+_move_axis_probe_active = False
+_air_probe_start_xy: tuple[float, float] | None = None
+_air_probe_start_value: float | None = None
+_air_probe_start_speed = 0.0
 
 _CROUCH_INPUT_FN_4 = (
     "GbxInpActEvt_InputAction_Discrete_Crouch_"
@@ -606,6 +613,36 @@ def _wants_crouch(pawn: UObject | None) -> bool:
     return _movement_bool(pawn, "GetWantsToCrouch")
 
 
+def _actor_xy(pawn: UObject | None) -> tuple[float, float] | None:
+    if pawn is None:
+        return None
+    try:
+        location = pawn.K2_GetActorLocation()
+        return float(location.X), float(location.Y)
+    except Exception:
+        return None
+
+
+def _air_control_actual(pawn: UObject | None) -> tuple[float | None, float | None]:
+    if pawn is None:
+        return None, None
+    movement = _get_move_component(pawn)
+    if movement is None:
+        return None, None
+
+    try:
+        actual = float(movement.AirControl)
+    except Exception:
+        actual = None
+
+    try:
+        velocity = movement.Velocity
+        speed_xy = math.hypot(float(velocity.X), float(velocity.Y))
+    except Exception:
+        speed_xy = None
+
+    return actual, speed_xy
+
 
 def _bound_function_path(func: BoundFunction) -> str:
     try:
@@ -792,6 +829,117 @@ def _find_action_bindings(
                 result[f"{class_path}:{function_name}"] = event
 
     return live_ability, result
+
+
+def _discover_move_binding() -> str | None:
+    global _move_action_name
+
+    try:
+        abilities = list(unrealsdk.find_all("PlayerAbility_Move_C", exact=False))
+    except Exception as exc:
+        logging.warning(f"[SnappyMovement movediag] find_all failed: {exc}")
+        return None
+
+    live_ability = next(
+        (ability for ability in abilities if "Default__" not in _path(ability)),
+        None,
+    )
+    if live_ability is None:
+        logging.warning("[SnappyMovement movediag] no live PlayerAbility_Move_C")
+        return None
+
+    cls = live_ability.Class
+    class_path = _path(cls)
+    matches: list[tuple[str, str]] = []
+
+    try:
+        dynamic_bindings = list(cls.DynamicBindingObjects)
+    except Exception as exc:
+        logging.warning(f"[SnappyMovement movediag] DynamicBindingObjects unavailable: {exc}")
+        return None
+
+    for binding_obj in dynamic_bindings:
+        try:
+            entries = list(binding_obj.InputActionReceiverDelegateBindings)
+        except Exception:
+            continue
+
+        for entry in entries:
+            try:
+                action = entry.Action
+                action_name = str(action.ActionName)
+                function_name = str(entry.FunctionNameToBind)
+            except Exception:
+                continue
+
+            if not action_name:
+                continue
+
+            function_path = f"{class_path}:{function_name}"
+            found = False
+            try:
+                found = unrealsdk.find_object("Function", function_path) is not None
+            except Exception:
+                pass
+
+            logging.warning(
+                "[SnappyMovement movediag] "
+                f"binding action={action_name!r} function={function_path!r} found={found}"
+            )
+
+            lowered = action_name.lower()
+            if lowered == "move" or "move" in lowered:
+                matches.append((action_name, function_path))
+
+    if matches:
+        _move_action_name = matches[0][0]
+        logging.warning(
+            "[SnappyMovement movediag] "
+            f"selected_move_action={_move_action_name!r} "
+            f"function={matches[0][1]!r}"
+        )
+        return _move_action_name
+
+    logging.warning("[SnappyMovement movediag] no Move continuous binding matched")
+    return None
+
+
+@hook(_GBX_CONTINUOUS_VECTOR_HOOK, Type.POST)
+def _gbx_continuous_vector_probe(
+    obj: UObject,
+    args: WrappedStruct,
+    _ret: Any,
+    _func: BoundFunction,
+) -> None:
+    global _move_axis_probe_active
+
+    if _move_action_name is None:
+        return
+
+    try:
+        action = args.AxisAction
+        action_name = str(action.ActionName)
+        value = args.Value
+        x = float(value.X)
+        y = float(value.Y)
+        z = float(value.Z)
+    except Exception:
+        return
+
+    if action_name != _move_action_name:
+        return
+
+    magnitude_sq = x * x + y * y + z * z
+    active = magnitude_sq > 0.0001
+
+    if active != _move_axis_probe_active:
+        logging.warning(
+            "[SnappyMovement movediag] "
+            f"upstream action={action_name!r} "
+            f"active={active} value=({x:.3f},{y:.3f},{z:.3f}) "
+            f"component={_path(obj)!r}"
+        )
+        _move_axis_probe_active = active
 
 
 def _walk_override_mode() -> str:
@@ -1076,6 +1224,25 @@ def _on_enable() -> None:
         f"target={_PLAYER_MOVE_HOOK!r} found={target_found} active={active}/{expected}"
     )
 
+    _discover_move_binding()
+    try:
+        upstream_found = (
+            unrealsdk.find_object("Function", _GBX_CONTINUOUS_VECTOR_HOOK) is not None
+        )
+    except Exception:
+        upstream_found = False
+    try:
+        upstream_active = _gbx_continuous_vector_probe.get_active_count()
+        upstream_expected = len(_gbx_continuous_vector_probe.hook_funcs)
+    except Exception:
+        upstream_active = -1
+        upstream_expected = -1
+    logging.warning(
+        "[SnappyMovement movediag] "
+        f"upstream_target={_GBX_CONTINUOUS_VECTOR_HOOK!r} "
+        f"found={upstream_found} active={upstream_active}/{upstream_expected}"
+    )
+
     _apply_auto_sprint_intent(_get_current_pawn())
 
 
@@ -1189,6 +1356,25 @@ def _on_jumped(
     _air_crouch_tap_pending = False
     _apply_air_control_override(obj)
 
+    global _air_probe_start_xy
+    global _air_probe_start_value
+    global _air_probe_start_speed
+
+    if bool(air_control_override_option.value):
+        _air_probe_start_xy = _actor_xy(obj)
+        _air_probe_start_value, start_speed = _air_control_actual(obj)
+        _air_probe_start_speed = float(start_speed or 0.0)
+        logging.warning(
+            "[SnappyMovement airdiag] "
+            f"jump target={float(air_control_option.value):.3f} "
+            f"actual={_air_probe_start_value!r} "
+            f"speed_xy={_air_probe_start_speed:.3f}"
+        )
+    else:
+        _air_probe_start_xy = None
+        _air_probe_start_value = None
+        _air_probe_start_speed = 0.0
+
     if bool(auto_sprint_option.value) or not bool(remember_sprint_option.value):
         _resume_sprint_after_landing = False
         return
@@ -1216,13 +1402,43 @@ def _on_landed_post(
 ) -> None:
     global _landing_crouch_pending
     global _landing_transition_pending
-
+    global _air_probe_start_xy
+    global _air_probe_start_value
+    global _air_probe_start_speed
 
     if not _same_uobject(obj, _get_current_pawn()):
         return
 
     _landing_transition_pending = True
     _landing_crouch_pending = _should_slide_from_landing(obj)
+
+    if bool(air_control_override_option.value):
+        end_xy = _actor_xy(obj)
+        land_actual, end_speed = _air_control_actual(obj)
+        if _air_probe_start_xy is not None and end_xy is not None:
+            dx = end_xy[0] - _air_probe_start_xy[0]
+            dy = end_xy[1] - _air_probe_start_xy[1]
+            distance = math.hypot(dx, dy)
+            logging.warning(
+                "[SnappyMovement airdiag] "
+                f"land target={float(air_control_option.value):.3f} "
+                f"jump_actual={_air_probe_start_value!r} "
+                f"land_actual={land_actual!r} "
+                f"start_speed_xy={_air_probe_start_speed:.3f} "
+                f"end_speed_xy={end_speed!r} "
+                f"dx={dx:.3f} dy={dy:.3f} distance_xy={distance:.3f}"
+            )
+        else:
+            logging.warning(
+                "[SnappyMovement airdiag] "
+                f"land target={float(air_control_option.value):.3f} "
+                f"jump_actual={_air_probe_start_value!r} "
+                f"land_actual={land_actual!r} location_unavailable=True"
+            )
+
+    _air_probe_start_xy = None
+    _air_probe_start_value = None
+    _air_probe_start_speed = 0.0
 
 
 def _finalize_landing_after_walking(pawn: UObject | None, source: str) -> None:
@@ -1597,6 +1813,7 @@ def _sanitize_loaded_settings(mod_obj: Mod) -> None:
 
 
 HOOKS = (
+    _gbx_continuous_vector_probe,
     _player_move,
     _set_wants_to_sprint,
     _on_start_sprinting,
