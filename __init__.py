@@ -204,6 +204,9 @@ _crouch_input_held = False
 _air_crouch_tap_pending = False
 _auto_sprint_applying = False
 _walk_override_active = False
+_air_probe_start_xy: tuple[float, float] | None = None
+_air_probe_start_speed = 0.0
+_air_probe_start_value: float | None = None
 
 _CROUCH_INPUT_FN_4 = (
     "GbxInpActEvt_InputAction_Discrete_Crouch_"
@@ -558,6 +561,63 @@ def _wants_sprint(pawn: UObject | None) -> bool:
 def _wants_crouch(pawn: UObject | None) -> bool:
     return _movement_bool(pawn, "GetWantsToCrouch")
 
+
+def _air_control_readback(pawn: UObject | None) -> tuple[float | None, float | None]:
+    if pawn is None:
+        return None, None
+    movement = _get_move_component(pawn)
+    if movement is None:
+        return None, None
+
+    try:
+        air_control = float(movement.AirControl)
+    except Exception:
+        air_control = None
+
+    try:
+        velocity = movement.Velocity
+        speed_xy = math.hypot(float(velocity.X), float(velocity.Y))
+    except Exception:
+        speed_xy = None
+
+    return air_control, speed_xy
+
+
+def _actor_xy(pawn: UObject | None) -> tuple[float, float] | None:
+    if pawn is None:
+        return None
+
+    location = None
+    try:
+        location = pawn.K2_GetActorLocation()
+    except Exception:
+        try:
+            location = pawn.RootComponent.RelativeLocation
+        except Exception:
+            return None
+
+    try:
+        return float(location.X), float(location.Y)
+    except Exception:
+        return None
+
+
+def _log_air_control_state(pawn: UObject | None, stage: str) -> None:
+    if not bool(air_control_override_option.value):
+        return
+
+    actual, speed_xy = _air_control_readback(pawn)
+    target = _safe_float_value(
+        air_control_option.value,
+        1.0,
+        AIR_CONTROL_MIN,
+        AIR_CONTROL_MAX,
+        "Air Control",
+    )
+    logging.warning(
+        "[SnappyMovement airprobe] "
+        f"stage={stage} target={target:.3f} actual={actual!r} speed_xy={speed_xy!r}"
+    )
 
 
 def _bound_function_path(func: BoundFunction) -> str:
@@ -1067,6 +1127,9 @@ def _on_jumped(
     global _resume_sprint_after_landing
     global _landing_crouch_pending
     global _air_crouch_tap_pending
+    global _air_probe_start_xy
+    global _air_probe_start_speed
+    global _air_probe_start_value
 
     _install_crouch_dynamic_hooks()
     _install_sprint_dynamic_hooks()
@@ -1076,6 +1139,17 @@ def _on_jumped(
 
     _landing_crouch_pending = False
     _air_crouch_tap_pending = False
+
+    if bool(air_control_override_option.value):
+        _air_probe_start_xy = _actor_xy(obj)
+        actual_air, speed_xy = _air_control_readback(obj)
+        _air_probe_start_value = actual_air
+        _air_probe_start_speed = float(speed_xy or 0.0)
+        _log_air_control_state(obj, "jump")
+    else:
+        _air_probe_start_xy = None
+        _air_probe_start_value = None
+        _air_probe_start_speed = 0.0
 
     if bool(auto_sprint_option.value) or not bool(remember_sprint_option.value):
         _resume_sprint_after_landing = False
@@ -1104,13 +1178,37 @@ def _on_landed_post(
 ) -> None:
     global _landing_crouch_pending
     global _landing_transition_pending
-
+    global _air_probe_start_xy
+    global _air_probe_start_speed
+    global _air_probe_start_value
 
     if not _same_uobject(obj, _get_current_pawn()):
         return
 
     _landing_transition_pending = True
     _landing_crouch_pending = _should_slide_from_landing(obj)
+
+    if bool(air_control_override_option.value):
+        end_xy = _actor_xy(obj)
+        actual_air, end_speed = _air_control_readback(obj)
+        if _air_probe_start_xy is not None and end_xy is not None:
+            dx = end_xy[0] - _air_probe_start_xy[0]
+            dy = end_xy[1] - _air_probe_start_xy[1]
+            distance = math.hypot(dx, dy)
+            logging.warning(
+                "[SnappyMovement airprobe] "
+                f"stage=land target={float(air_control_option.value):.3f} "
+                f"jump_actual={_air_probe_start_value!r} land_actual={actual_air!r} "
+                f"start_speed_xy={_air_probe_start_speed:.3f} "
+                f"end_speed_xy={end_speed!r} "
+                f"dx={dx:.3f} dy={dy:.3f} distance_xy={distance:.3f}"
+            )
+        else:
+            _log_air_control_state(obj, "land-no-location")
+
+    _air_probe_start_xy = None
+    _air_probe_start_value = None
+    _air_probe_start_speed = 0.0
 
 
 def _finalize_landing_after_walking(pawn: UObject | None, source: str) -> None:
@@ -1173,7 +1271,9 @@ def _movement_mode_changed(
         return
 
 
-    if new_mode == 1:
+    if new_mode == 3 and bool(air_control_override_option.value):
+        _log_air_control_state(obj, "falling")
+    elif new_mode == 1:
         _finalize_landing_after_walking(obj, "K2")
 
 
@@ -1354,6 +1454,7 @@ def _on_brake_change(_option: SliderOption, new_value: float) -> None:
 def _on_movement_feature_change(_option: Any, _new_value: Any) -> None:
     if mod.is_enabled:
         _apply_current_values()
+        _log_air_control_state(_get_current_pawn(), "option-change")
 
 
 def _on_auto_sprint_change(_option: BoolOption, new_value: bool) -> None:
