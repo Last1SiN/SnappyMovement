@@ -26,8 +26,8 @@ CROUCH_SLIDE_MODES = (
 )
 
 WALK_OVERRIDE_DISABLED = "Disabled"
-WALK_OVERRIDE_HOLD = "Hold Sprint Key to Walk"
-WALK_OVERRIDE_TOGGLE = "Toggle Sprint Key to Walk"
+WALK_OVERRIDE_HOLD = "Hold Sprint Input to Walk"
+WALK_OVERRIDE_TOGGLE = "Toggle Sprint Input to Walk"
 WALK_OVERRIDE_MODES = (
     WALK_OVERRIDE_DISABLED,
     WALK_OVERRIDE_HOLD,
@@ -140,9 +140,9 @@ walk_override_option = SpinnerOption(
     wrap_enabled=False,
     display_name="Auto Sprint Walk Override",
     description=(
-        "Disabled: the Sprint key cannot cancel Auto Sprint. "
-        "Hold: hold the Sprint key to walk, then release to sprint again. "
-        "Toggle: press the Sprint key to switch between walking and Auto Sprint."
+        "Disabled: Sprint input cannot cancel Auto Sprint. "
+        "Hold: hold Sprint input to walk, then release to sprint again. "
+        "Toggle: press Sprint input to switch between walking and Auto Sprint."
     ),
 )
 
@@ -1257,7 +1257,9 @@ def _client_restart(
     acceleration, braking = _current_values()
     _apply_to_pawn(pawn, acceleration, braking, report_failure=True)
     _install_crouch_dynamic_hooks()
-    _install_sprint_dynamic_hooks()
+    sprint_hooks_ready = _install_sprint_dynamic_hooks()
+    if bool(auto_sprint_option.value) and not sprint_hooks_ready:
+        _error("Auto Sprint Walk Override: Sprint input bindings are unavailable")
     _apply_auto_sprint_intent(pawn)
 
 
@@ -1358,8 +1360,10 @@ def _on_auto_sprint_change(_option: BoolOption, new_value: bool) -> None:
         return
 
     pawn = _get_current_pawn()
-    _install_sprint_dynamic_hooks()
+    sprint_hooks_ready = _install_sprint_dynamic_hooks()
     if bool(new_value):
+        if pawn is not None and not sprint_hooks_ready:
+            _error("Auto Sprint Walk Override: Sprint input bindings are unavailable")
         _apply_auto_sprint_intent(pawn)
     else:
         _release_auto_sprint(pawn)
