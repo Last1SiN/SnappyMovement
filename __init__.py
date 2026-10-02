@@ -1138,7 +1138,10 @@ def _on_start_sprinting(
 ) -> None:
     global _sprint_chain_armed
 
-    if not _same_uobject(obj, _get_current_pawn()):
+    if (
+        _auto_sprint_applying
+        or not _same_uobject(obj, _get_current_pawn())
+    ):
         return
 
     if bool(remember_sprint_option.value) and not bool(auto_sprint_option.value):
@@ -1154,7 +1157,10 @@ def _on_end_sprinting(
 ) -> None:
     global _sprint_chain_armed
 
-    if not _same_uobject(obj, _get_current_pawn()):
+    if (
+        _auto_sprint_applying
+        or not _same_uobject(obj, _get_current_pawn())
+    ):
         return
 
     if bool(auto_sprint_option.value):
