@@ -218,10 +218,10 @@ _CROUCH_INPUT_FN_5 = (
     "K2Node_GbxInputActionEvent_Discrete_5"
 )
 _CROUCH_FLUSH_FN = "FlushCrouchInput"
-_CROUCH_DYNAMIC_ID_PREFIX = "snappymovement:crouch-input:v1.3.11"
+_CROUCH_DYNAMIC_ID_PREFIX = "snappymovement:crouch-input:v1.1"
 _crouch_dynamic_hooks: list[tuple[str, str]] = []
 
-_SPRINT_DYNAMIC_ID_PREFIX = "snappymovement:sprint-input:v1.3.11"
+_SPRINT_DYNAMIC_ID_PREFIX = "snappymovement:sprint-input:v1.1"
 _sprint_dynamic_hooks: list[tuple[str, Type, str]] = []
 _sprint_event_by_path: dict[str, str] = {}
 
@@ -1504,7 +1504,6 @@ def _on_auto_sprint_change(_option: BoolOption, new_value: bool) -> None:
     if not mod.is_enabled:
         return
 
-    stored_before = bool(auto_sprint_option.value)
     enabled = bool(new_value)
     pawn = _get_current_pawn()
 
@@ -1517,16 +1516,6 @@ def _on_auto_sprint_change(_option: BoolOption, new_value: bool) -> None:
         _set_auto_sprint_native_intent(pawn, True)
     else:
         _release_auto_sprint(pawn)
-
-    movement = _get_move_component(pawn) if pawn is not None else None
-    logging.warning(
-        "[SnappyMovement togglediag] "
-        f"auto_sprint stored_before={stored_before} new={enabled} "
-        f"wants={_movement_flag(movement, 'bWantsToSprint')} "
-        f"start={_movement_flag(movement, 'bWantsToStartSprinting')} "
-        f"is={_movement_flag(movement, 'bIsSprinting')} "
-        f"sprint_hooks={len(_sprint_dynamic_hooks)}"
-    )
 
 
 def _on_walk_override_change(_option: SpinnerOption, new_value: str) -> None:
