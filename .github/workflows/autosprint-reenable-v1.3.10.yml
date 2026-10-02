@@ -76,7 +76,7 @@ jobs:
           assert text.count("pawn.SetWantsToSprint(wanted)") == 1
           assert text.count("movement.bWantsToStartSprinting = wanted") == 1
           assert "pawn.SetWantsToSprint(False)" not in text
-          assert "pawn.SetWantsToSprint(True)" == False
+          assert "pawn.SetWantsToSprint(True)" not in text
 
           helper_start = text.index("def _set_auto_sprint_native_intent(")
           helper_end = text.index("def _apply_auto_sprint_intent(", helper_start)
