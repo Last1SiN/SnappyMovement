@@ -218,10 +218,10 @@ _CROUCH_INPUT_FN_5 = (
     "K2Node_GbxInputActionEvent_Discrete_5"
 )
 _CROUCH_FLUSH_FN = "FlushCrouchInput"
-_CROUCH_DYNAMIC_ID_PREFIX = "snappymovement:crouch-input:v1.3.9"
+_CROUCH_DYNAMIC_ID_PREFIX = "snappymovement:crouch-input:v1.3.10"
 _crouch_dynamic_hooks: list[tuple[str, str]] = []
 
-_SPRINT_DYNAMIC_ID_PREFIX = "snappymovement:sprint-input:v1.3.9"
+_SPRINT_DYNAMIC_ID_PREFIX = "snappymovement:sprint-input:v1.3.10"
 _sprint_dynamic_hooks: list[tuple[str, Type, str]] = []
 _sprint_event_by_path: dict[str, str] = {}
 
@@ -794,25 +794,30 @@ def _walk_override_mode() -> str:
     return WALK_OVERRIDE_HOLD
 
 
-def _apply_auto_sprint_intent(pawn: UObject | None) -> bool:
+def _set_auto_sprint_native_intent(
+    pawn: UObject | None,
+    wanted: bool,
+    *,
+    report_failure: bool = True,
+) -> bool:
     global _auto_sprint_applying
 
-    if pawn is None or not bool(auto_sprint_option.value):
+    if pawn is None:
         return False
 
-    wanted = not _walk_override_active
     try:
         _auto_sprint_applying = True
         pawn.SetWantsToSprint(wanted)
-        if wanted:
-            movement = _get_move_component(pawn)
-            if movement is not None:
-                try:
-                    movement.bWantsToStartSprinting = True
-                except Exception:
-                    pass
+
+        movement = _get_move_component(pawn)
+        if movement is not None:
+            try:
+                movement.bWantsToStartSprinting = wanted
+            except Exception:
+                pass
     except Exception as exc:
-        _error(f"Auto Sprint: failed to set native sprint intent: {exc}")
+        if report_failure:
+            _error(f"Auto Sprint: failed to set native sprint intent: {exc}")
         return False
     finally:
         _auto_sprint_applying = False
@@ -820,18 +825,22 @@ def _apply_auto_sprint_intent(pawn: UObject | None) -> bool:
     return True
 
 
-def _release_auto_sprint(pawn: UObject | None) -> None:
-    global _auto_sprint_applying
+def _apply_auto_sprint_intent(pawn: UObject | None) -> bool:
+    if pawn is None or not bool(auto_sprint_option.value):
+        return False
 
-    if pawn is None:
-        return
-    try:
-        _auto_sprint_applying = True
-        pawn.SetWantsToSprint(False)
-    except Exception:
-        pass
-    finally:
-        _auto_sprint_applying = False
+    return _set_auto_sprint_native_intent(
+        pawn,
+        not _walk_override_active,
+    )
+
+
+def _release_auto_sprint(pawn: UObject | None) -> None:
+    _set_auto_sprint_native_intent(
+        pawn,
+        False,
+        report_failure=False,
+    )
 
 
 def _sprint_input_pre(
