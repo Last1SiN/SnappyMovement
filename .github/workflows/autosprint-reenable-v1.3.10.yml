@@ -1,0 +1,146 @@
+name: Temporary SnappyMovement Auto Sprint re-enable v1.3.10
+
+on:
+  push:
+    branches:
+      - fix-autosprint-reenable-v1.3.10
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate Auto Sprint re-enable fix and package
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import ast, hashlib, tomllib, zipfile
+
+          source = Path("__init__.py")
+          text = source.read_text(encoding="utf-8")
+          tree = ast.parse(text, filename=str(source))
+          compile(text, "__init__.py", "exec")
+
+          required = (
+              "def _set_auto_sprint_native_intent(",
+              "pawn.SetWantsToSprint(wanted)",
+              "movement.bWantsToStartSprinting = wanted",
+              "return _set_auto_sprint_native_intent(",
+              "def _release_auto_sprint(",
+              "report_failure=False",
+              "def _sync_sprint_dynamic_hooks(",
+              '@hook("/Script/OakGame.OakCharacter:OnEndSprinting", Type.POST)',
+          )
+          for needle in required:
+              assert needle in text, needle
+
+          for forbidden in (
+              "movement.bWantsToStartSprinting = True",
+              "airresponse",
+              "airproof",
+              "airfix",
+              "autosprintfix",
+              "moveprobe",
+              "movediag",
+              "_PLAYER_MOVE_HOOK",
+              "InputAction_Continuous_Vector_Impl",
+              "ReceiveTick",
+              "PlayerTick",
+              "GameViewportClient:Tick",
+              "OakPlayerController:InputKey",
+              "Velocity =",
+              "MaxWalkSpeed =",
+              "MaxSprintSpeed =",
+              "logging.warning",
+          ):
+              assert forbidden not in text, forbidden
+
+          # Keep the audited production runtime surface unchanged.
+          assert text.count("@hook(") == 9
+          assert text.count("add_hook(") == 3
+          assert text.count("remove_hook(") == 3
+          assert text.count("component.AirControl =") == 3
+          assert text.count("component.MaxAcceleration =") == 2
+          assert text.count("component.BrakingDecelerationWalking =") == 2
+          assert text.count("component.MaxSprintAngle =") == 2
+          assert text.count("pawn.SetWantsToSlide(True)") == 1
+
+          # Auto Sprint native state is now one symmetric write path.
+          assert text.count("pawn.SetWantsToSprint(wanted)") == 1
+          assert text.count("movement.bWantsToStartSprinting = wanted") == 1
+          assert "pawn.SetWantsToSprint(False)" not in text
+          assert "pawn.SetWantsToSprint(True)" == False
+
+          helper_start = text.index("def _set_auto_sprint_native_intent(")
+          helper_end = text.index("def _apply_auto_sprint_intent(", helper_start)
+          helper = text[helper_start:helper_end]
+          assert helper.index("pawn.SetWantsToSprint(wanted)") < helper.index(
+              "movement.bWantsToStartSprinting = wanted"
+          )
+          assert "_auto_sprint_applying = True" in helper
+          assert "_auto_sprint_applying = False" in helper
+
+          release_start = text.index("def _release_auto_sprint(")
+          release_end = text.index("def _sprint_input_pre(", release_start)
+          release = text[release_start:release_end]
+          assert "_set_auto_sprint_native_intent(" in release
+          assert "False" in release
+          assert "report_failure=False" in release
+
+          # Audit-cleanup guarantees must remain.
+          assert "if _same_uobject(record[0], component):" in text
+          assert "MOVE_WALKING = 1" in text
+          assert "MOVE_FALLING = 3" in text
+          assert "def _sync_sprint_dynamic_hooks(" in text
+
+          sanitize_start = text.index("def _sanitize_loaded_settings(")
+          sanitize_end = text.index("HOOKS = (", sanitize_start)
+          sanitize = text[sanitize_start:sanitize_end]
+          assert "air_control_option.value =" not in sanitize
+
+          meta = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+          assert meta["project"]["version"] == "1.3.10"
+          assert meta["tool"]["sdkmod"]["version"] == "1.3.10"
+
+          stage = Path("stage/SnappyMovement")
+          stage.mkdir(parents=True, exist_ok=True)
+          payload = (
+              "__init__.py",
+              "pyproject.toml",
+              "README.md",
+              "README_RU.md",
+              "LICENSE",
+              "ADDITIONAL_TERMS.md",
+          )
+          for name in payload:
+              (stage / name).write_bytes(Path(name).read_bytes())
+
+          archive = Path("dist/SnappyMovement.sdkmod")
+          archive.parent.mkdir(exist_ok=True)
+          with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+              for path in sorted(stage.rglob("*")):
+                  if path.is_file():
+                      zf.write(path, path.relative_to(stage.parent).as_posix())
+
+          with zipfile.ZipFile(archive) as zf:
+              names = [n for n in zf.namelist() if n and not n.endswith("/")]
+              assert {n.split("/", 1)[0] for n in names} == {"SnappyMovement"}
+              assert sorted(n.split("/", 1)[1] for n in names) == sorted(payload)
+
+          print("source_sha256", hashlib.sha256(source.read_bytes()).hexdigest())
+          print("artifact_sha256", hashlib.sha256(archive.read_bytes()).hexdigest())
+          print("AUTOSPRINT_REENABLE_V1310_GATES_PASS")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SnappyMovement-autosprint-reenable-v1.3.10
+          path: dist/SnappyMovement.sdkmod
+          if-no-files-found: error
