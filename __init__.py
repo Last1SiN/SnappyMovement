@@ -207,7 +207,8 @@ _walk_override_active = False
 _move_input_active = False
 _move_probe_logged = False
 
-_PLAYER_MOVE_HOOK = "/Script/OakGame.OakInputAbility_Player_Common:PlayerMove"
+_GBX_CONTINUOUS_VECTOR_HOOK = "/Script/GbxInput.GbxInputComponent:InputAction_Continuous_Vector_Impl"
+_move_action_name: str | None = None
 
 _CROUCH_INPUT_FN_4 = (
     "GbxInpActEvt_InputAction_Discrete_Crouch_"
@@ -218,10 +219,10 @@ _CROUCH_INPUT_FN_5 = (
     "K2Node_GbxInputActionEvent_Discrete_5"
 )
 _CROUCH_FLUSH_FN = "FlushCrouchInput"
-_CROUCH_DYNAMIC_ID_PREFIX = "snappymovement:crouch-input:v1.3.0"
+_CROUCH_DYNAMIC_ID_PREFIX = "snappymovement:crouch-input:v1.3.4"
 _crouch_dynamic_hooks: list[tuple[str, str]] = []
 
-_SPRINT_DYNAMIC_ID_PREFIX = "snappymovement:sprint-input:v1.3.0"
+_SPRINT_DYNAMIC_ID_PREFIX = "snappymovement:sprint-input:v1.3.4"
 _sprint_dynamic_hooks: list[tuple[str, Type, str]] = []
 _sprint_event_by_path: dict[str, str] = {}
 
@@ -794,6 +795,60 @@ def _find_action_bindings(
     return live_ability, result
 
 
+def _discover_move_action_name() -> str | None:
+    global _move_action_name
+
+    try:
+        abilities = list(unrealsdk.find_all("PlayerAbility_Move_C", exact=False))
+    except Exception:
+        abilities = []
+
+    ability = None
+    for candidate in abilities:
+        if "Default__" not in _path(candidate):
+            ability = candidate
+            break
+    if ability is None and abilities:
+        ability = abilities[0]
+
+    if ability is not None:
+        try:
+            cls = ability.Class
+            dynamic_bindings = list(cls.DynamicBindingObjects)
+        except Exception:
+            dynamic_bindings = []
+
+        candidates: list[str] = []
+        for binding_obj in dynamic_bindings:
+            try:
+                entries = list(binding_obj.InputActionReceiverDelegateBindings)
+            except Exception:
+                continue
+
+            for entry in entries:
+                try:
+                    action_name = str(entry.Action.ActionName)
+                except Exception:
+                    continue
+                if action_name:
+                    candidates.append(action_name)
+
+        exact = next((name for name in candidates if name.lower() == "move"), None)
+        fuzzy = next(
+            (
+                name
+                for name in candidates
+                if "move" in name.lower() and "look" not in name.lower()
+            ),
+            None,
+        )
+        _move_action_name = exact or fuzzy
+        if _move_action_name is not None:
+            return _move_action_name
+
+    return _move_action_name
+
+
 def _walk_override_mode() -> str:
     mode = str(walk_override_option.value)
     if mode in WALK_OVERRIDE_MODES:
@@ -883,31 +938,42 @@ def _sprint_input_post(
         _apply_auto_sprint_intent(pawn)
 
 
-@hook(_PLAYER_MOVE_HOOK, Type.POST)
-def _player_move(
+@hook(_GBX_CONTINUOUS_VECTOR_HOOK, Type.POST)
+def _continuous_move_input(
     obj: UObject,
     args: WrappedStruct,
     _ret: Any,
     _func: BoundFunction,
 ) -> None:
     global _move_input_active
+    global _move_action_name
     global _move_probe_logged
 
     if not bool(auto_sprint_option.value):
         _move_input_active = False
         return
 
-    pawn = _get_current_pawn()
-    if not _ability_belongs_to_pawn(obj, pawn):
-        return
-
     try:
-        value = args.Val
-        magnitude_sq = float(value.X) ** 2 + float(value.Y) ** 2
+        action = args.AxisAction
+        action_name = str(action.ActionName)
+        value = args.Value
+        x = float(value.X)
+        y = float(value.Y)
+        z = float(value.Z)
     except Exception:
         return
 
+    if _move_action_name is None:
+        discovered = _discover_move_action_name()
+        if discovered is None and action_name.lower() == "move":
+            _move_action_name = action_name
+
+    if _move_action_name is None or action_name != _move_action_name:
+        return
+
+    magnitude_sq = x * x + y * y + z * z
     active = magnitude_sq > 0.0001
+
     if not active:
         _move_input_active = False
         return
@@ -916,10 +982,16 @@ def _player_move(
         return
 
     _move_input_active = True
+    pawn = _get_current_pawn()
+    if pawn is None:
+        return
+
     if not _move_probe_logged:
         logging.warning(
             "[SnappyMovement moveprobe] "
-            f"PlayerMove local callback magnitude_sq={magnitude_sq:.4f}"
+            f"continuous Move callback action={action_name!r} "
+            f"value=({x:.3f},{y:.3f},{z:.3f}) "
+            f"component={_path(obj)!r}"
         )
         _move_probe_logged = True
 
@@ -1061,19 +1133,24 @@ def _on_enable() -> None:
     _install_crouch_dynamic_hooks()
     _install_sprint_dynamic_hooks()
 
+    _discover_move_action_name()
     try:
-        target_found = unrealsdk.find_object("Function", _PLAYER_MOVE_HOOK) is not None
+        target_found = (
+            unrealsdk.find_object("Function", _GBX_CONTINUOUS_VECTOR_HOOK) is not None
+        )
     except Exception:
         target_found = False
     try:
-        active = _player_move.get_active_count()
-        expected = len(_player_move.hook_funcs)
+        active = _continuous_move_input.get_active_count()
+        expected = len(_continuous_move_input.hook_funcs)
     except Exception:
         active = -1
         expected = -1
     logging.warning(
         "[SnappyMovement moveprobe] "
-        f"target={_PLAYER_MOVE_HOOK!r} found={target_found} active={active}/{expected}"
+        f"target={_GBX_CONTINUOUS_VECTOR_HOOK!r} "
+        f"found={target_found} active={active}/{expected} "
+        f"move_action={_move_action_name!r}"
     )
 
     _apply_auto_sprint_intent(_get_current_pawn())
@@ -1378,6 +1455,7 @@ def _client_restart(
     _apply_to_pawn(pawn, acceleration, braking, report_failure=True)
     _install_crouch_dynamic_hooks()
     sprint_hooks_ready = _install_sprint_dynamic_hooks()
+    _discover_move_action_name()
     if bool(auto_sprint_option.value) and not sprint_hooks_ready:
         _error("Auto Sprint Walk Override: Sprint input bindings are unavailable")
     _apply_auto_sprint_intent(pawn)
@@ -1597,7 +1675,7 @@ def _sanitize_loaded_settings(mod_obj: Mod) -> None:
 
 
 HOOKS = (
-    _player_move,
+    _continuous_move_input,
     _set_wants_to_sprint,
     _on_start_sprinting,
     _on_end_sprinting,
