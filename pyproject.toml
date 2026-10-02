@@ -1,6 +1,6 @@
 [project]
 name = "SnappyMovement"
-version = "1.3.10"
+version = "1.3.11"
 description = "Makes Borderlands 3 movement more responsive with acceleration/braking tuning plus optional air control, auto sprint, directional sprint, and landing-slide behavior."
 authors = [
     { name = "Sol / GPT-5.6 Sol" }
@@ -15,7 +15,7 @@ AdditionalTerms = "https://github.com/Last1SiN/SnappyMovement/blob/main/ADDITION
 
 [tool.sdkmod]
 name = "SnappyMovement"
-version = "1.3.10"
+version = "1.3.11"
 license = { name = "GPL3 + Section 7 terms", url = "https://github.com/Last1SiN/SnappyMovement/blob/main/ADDITIONAL_TERMS.md" }
 download = "https://github.com/Last1SiN/SnappyMovement/releases/latest/download/SnappyMovement.sdkmod"
 coop_support = "Unknown"
