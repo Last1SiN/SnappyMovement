@@ -1026,7 +1026,7 @@ def _on_start_sprinting(
     if not _same_uobject(obj, _get_current_pawn()):
         return
 
-    if bool(remember_sprint_option.value):
+    if bool(remember_sprint_option.value) and not bool(auto_sprint_option.value):
         _sprint_chain_armed = True
 
 
@@ -1039,7 +1039,11 @@ def _on_end_sprinting(
 ) -> None:
     global _sprint_chain_armed
 
-    if not _same_uobject(obj, _get_current_pawn()) or not bool(remember_sprint_option.value):
+    if (
+        not _same_uobject(obj, _get_current_pawn())
+        or bool(auto_sprint_option.value)
+        or not bool(remember_sprint_option.value)
+    ):
         return
 
 
@@ -1354,8 +1358,12 @@ def _on_movement_feature_change(_option: Any, _new_value: Any) -> None:
 
 def _on_auto_sprint_change(_option: BoolOption, new_value: bool) -> None:
     global _walk_override_active
+    global _sprint_chain_armed
+    global _resume_sprint_after_landing
 
     _walk_override_active = False
+    _sprint_chain_armed = False
+    _resume_sprint_after_landing = False
     if not mod.is_enabled:
         return
 
