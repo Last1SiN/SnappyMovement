@@ -25,6 +25,15 @@ CROUCH_SLIDE_MODES = (
     CROUCH_SLIDE_TAP,
 )
 
+WALK_OVERRIDE_DISABLED = "Disabled"
+WALK_OVERRIDE_HOLD = "Hold Sprint Key to Walk"
+WALK_OVERRIDE_TOGGLE = "Toggle Sprint Key to Walk"
+WALK_OVERRIDE_MODES = (
+    WALK_OVERRIDE_DISABLED,
+    WALK_OVERRIDE_HOLD,
+    WALK_OVERRIDE_TOGGLE,
+)
+
 PRESETS: dict[str, tuple[float, float]] = {
     PROFILE_SOFT: (8000.0, 10000.0),
     PROFILE_NEAR: (30000.0, 40000.0),
@@ -35,6 +44,9 @@ ACCEL_MIN = 1000.0
 ACCEL_MAX = 150000.0
 BRAKE_MIN = 1000.0
 BRAKE_MAX = 180000.0
+AIR_CONTROL_MIN = 0.0
+AIR_CONTROL_MAX = 20.0
+ANY_DIRECTION_SPRINT_ANGLE = 180.0
 
 profile_option = SpinnerOption(
     "profile",
@@ -78,13 +90,69 @@ brake_option = SliderOption(
     ),
 )
 
+air_control_override_option = BoolOption(
+    identifier="air_control_override",
+    value=False,
+    display_name="Air Control Override",
+    description=(
+        "Use the custom Air Control value while airborne. Off restores the game's "
+        "original AirControl value."
+    ),
+)
+
+air_control_option = SliderOption(
+    "air_control",
+    1.0,
+    AIR_CONTROL_MIN,
+    AIR_CONTROL_MAX,
+    0.1,
+    is_integer=False,
+    display_name="Air Control",
+    description=(
+        "Air steering strength from 0 to 20. 0 disables steering; higher values make "
+        "direction changes increasingly immediate. Only used while Air Control Override is on."
+    ),
+)
+
 remember_sprint_option = BoolOption(
     identifier="remember_sprint",
     value=False,
     display_name="Remember Sprint",
     description=(
         "Remembers sprint intent through jumps and slide-jumps, then lets the game "
-        "resume sprint after landing without another sprint press."
+        "resume sprint after landing without another sprint press. Auto Sprint supersedes it."
+    ),
+)
+
+auto_sprint_option = BoolOption(
+    identifier="auto_sprint",
+    value=False,
+    display_name="Auto Sprint",
+    description=(
+        "Keeps the game's native sprint intent enabled whenever walking override is not active."
+    ),
+)
+
+walk_override_option = SpinnerOption(
+    "walk_override",
+    WALK_OVERRIDE_HOLD,
+    list(WALK_OVERRIDE_MODES),
+    wrap_enabled=False,
+    display_name="Auto Sprint Walk Override",
+    description=(
+        "Disabled: the Sprint key cannot cancel Auto Sprint. "
+        "Hold: hold the Sprint key to walk, then release to sprint again. "
+        "Toggle: press the Sprint key to switch between walking and Auto Sprint."
+    ),
+)
+
+any_direction_sprint_option = BoolOption(
+    identifier="any_direction_sprint",
+    value=False,
+    display_name="Sprint in All Directions",
+    description=(
+        "Raises the game's native sprint-angle limit to 180 degrees so sprint can continue "
+        "sideways and backward without changing sprint speed."
     ),
 )
 
@@ -111,13 +179,20 @@ OPTIONS = (
     profile_option,
     accel_option,
     brake_option,
+    air_control_override_option,
+    air_control_option,
     remember_sprint_option,
+    auto_sprint_option,
+    walk_override_option,
+    any_direction_sprint_option,
     legacy_slide_from_landing_option,
     crouch_slide_mode_option,
 )
 
 _syncing_options = False
-_patched_components: list[tuple[UObject, float, float]] = []
+_patched_components: list[
+    tuple[UObject, float, float, float | None, float | None]
+] = []
 
 _sprint_chain_armed = False
 _resume_sprint_after_landing = False
@@ -127,6 +202,8 @@ _landing_transition_pending = False
 _air_slide_intent = False
 _crouch_input_held = False
 _air_crouch_tap_pending = False
+_auto_sprint_applying = False
+_walk_override_active = False
 
 _CROUCH_INPUT_FN_4 = (
     "GbxInpActEvt_InputAction_Discrete_Crouch_"
@@ -137,9 +214,12 @@ _CROUCH_INPUT_FN_5 = (
     "K2Node_GbxInputActionEvent_Discrete_5"
 )
 _CROUCH_FLUSH_FN = "FlushCrouchInput"
-_CROUCH_DYNAMIC_ID_PREFIX = "snappymovement:crouch-input:v1.2.1"
+_CROUCH_DYNAMIC_ID_PREFIX = "snappymovement:crouch-input:v1.3.0"
 _crouch_dynamic_hooks: list[tuple[str, str]] = []
 
+_SPRINT_DYNAMIC_ID_PREFIX = "snappymovement:sprint-input:v1.3.0"
+_sprint_dynamic_hooks: list[tuple[str, Type, str]] = []
+_sprint_event_by_path: dict[str, str] = {}
 
 
 def _error(message: str) -> None:
@@ -181,6 +261,24 @@ def _safe_value(
         return maximum
 
     return round(value)
+
+
+def _safe_float_value(
+    raw: Any,
+    default: float,
+    minimum: float,
+    maximum: float,
+    label: str,
+) -> float:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        _error(f"{label}: invalid value {raw!r}; using {default:g}")
+        return default
+    if not math.isfinite(value):
+        _error(f"{label}: non-finite value {value!r}; using {default:g}")
+        return default
+    return min(max(value, minimum), maximum)
 
 
 def _current_values(profile: str | None = None) -> tuple[float, float]:
@@ -279,19 +377,39 @@ def _get_move_component(pawn: UObject) -> UObject | None:
     return None
 
 
-def _remember_original(component: UObject) -> None:
-    for existing, _old_accel, _old_brake in _patched_components:
-        if existing is component:
-            return
+def _remember_original(
+    component: UObject,
+) -> tuple[UObject, float, float, float | None, float | None] | None:
+    for record in _patched_components:
+        if record[0] is component:
+            return record
 
     try:
         old_accel = float(component.MaxAcceleration)
         old_brake = float(component.BrakingDecelerationWalking)
     except Exception as exc:
         _error(f"could not read original movement values from {_path(component)}: {exc}")
-        return
+        return None
 
-    _patched_components.append((component, old_accel, old_brake))
+    try:
+        old_air_control: float | None = float(component.AirControl)
+    except Exception:
+        old_air_control = None
+
+    try:
+        old_sprint_angle: float | None = float(component.MaxSprintAngle)
+    except Exception:
+        old_sprint_angle = None
+
+    record = (
+        component,
+        old_accel,
+        old_brake,
+        old_air_control,
+        old_sprint_angle,
+    )
+    _patched_components.append(record)
+    return record
 
 
 def _apply_to_pawn(
@@ -310,13 +428,49 @@ def _apply_to_pawn(
             _error(f"could not locate movement component on {_path(pawn)}")
         return
 
-    _remember_original(component)
+    record = _remember_original(component)
+    if record is None:
+        return
+
+    _, _old_accel, _old_brake, old_air_control, old_sprint_angle = record
 
     try:
         component.MaxAcceleration = acceleration
         component.BrakingDecelerationWalking = braking
     except Exception as exc:
         _error(f"failed to apply movement values to {_path(component)}: {exc}")
+
+    if old_air_control is not None:
+        target_air_control = old_air_control
+        if bool(air_control_override_option.value):
+            target_air_control = _safe_float_value(
+                air_control_option.value,
+                1.0,
+                AIR_CONTROL_MIN,
+                AIR_CONTROL_MAX,
+                "Air Control",
+            )
+        try:
+            component.AirControl = target_air_control
+        except Exception as exc:
+            if bool(air_control_override_option.value):
+                _error(f"failed to apply Air Control to {_path(component)}: {exc}")
+    elif bool(air_control_override_option.value) and report_failure:
+        _error(f"Air Control is unavailable on {_path(component)}")
+
+    if old_sprint_angle is not None:
+        target_sprint_angle = (
+            ANY_DIRECTION_SPRINT_ANGLE
+            if bool(any_direction_sprint_option.value)
+            else old_sprint_angle
+        )
+        try:
+            component.MaxSprintAngle = target_sprint_angle
+        except Exception as exc:
+            if bool(any_direction_sprint_option.value):
+                _error(f"failed to apply sprint angle to {_path(component)}: {exc}")
+    elif bool(any_direction_sprint_option.value) and report_failure:
+        _error(f"MaxSprintAngle is unavailable on {_path(component)}")
 
 
 def _apply_current_values() -> None:
@@ -327,16 +481,19 @@ def _apply_current_values() -> None:
 def _restore_all() -> None:
     global _patched_components
 
-    for component, old_accel, old_brake in _patched_components:
+    for component, old_accel, old_brake, old_air_control, old_sprint_angle in _patched_components:
         try:
             component.MaxAcceleration = old_accel
             component.BrakingDecelerationWalking = old_brake
+            if old_air_control is not None:
+                component.AirControl = old_air_control
+            if old_sprint_angle is not None:
+                component.MaxSprintAngle = old_sprint_angle
         except Exception:
             # Destroyed pawns/components from map changes or respawns can remain as stale wrappers.
             pass
 
     _patched_components = []
-
 
 
 def _same_uobject(left: UObject | None, right: UObject | None) -> bool:
@@ -518,6 +675,216 @@ def _install_crouch_dynamic_hooks() -> bool:
     return len(installed) >= 2
 
 
+def _input_event_name(value: Any) -> str | None:
+    try:
+        name = str(value.name)
+    except Exception:
+        name = str(value)
+
+    lowered = name.lower()
+    if "pressed" in lowered:
+        return "pressed"
+    if "released" in lowered:
+        return "released"
+
+    try:
+        raw = int(getattr(value, "value", value))
+    except Exception:
+        return None
+    if raw == 0:
+        return "pressed"
+    if raw == 1:
+        return "released"
+    return None
+
+
+def _find_action_bindings(
+    ability_class_name: str,
+    action_name: str,
+) -> tuple[UObject | None, dict[str, str]]:
+    try:
+        abilities = list(unrealsdk.find_all(ability_class_name, exact=False))
+    except Exception:
+        return None, {}
+
+    live_ability = next(
+        (ability for ability in abilities if "Default__" not in _path(ability)),
+        None,
+    )
+    if live_ability is None:
+        return None, {}
+
+    cls = live_ability.Class
+    class_path = _path(cls)
+    result: dict[str, str] = {}
+
+    try:
+        dynamic_bindings = list(cls.DynamicBindingObjects)
+    except Exception:
+        return live_ability, {}
+
+    for binding_obj in dynamic_bindings:
+        try:
+            entries = list(binding_obj.InputActionReceiverDelegateBindings)
+        except Exception:
+            continue
+        for entry in entries:
+            try:
+                action = entry.Action
+                current_action_name = str(action.ActionName)
+            except Exception:
+                continue
+            if current_action_name.lower() != action_name.lower():
+                continue
+            try:
+                event = _input_event_name(entry.InputEvent)
+                function_name = str(entry.FunctionNameToBind)
+            except Exception:
+                continue
+            if event in ("pressed", "released"):
+                result[f"{class_path}:{function_name}"] = event
+
+    return live_ability, result
+
+
+def _walk_override_mode() -> str:
+    mode = str(walk_override_option.value)
+    if mode in WALK_OVERRIDE_MODES:
+        return mode
+    return WALK_OVERRIDE_HOLD
+
+
+def _apply_auto_sprint_intent(pawn: UObject | None) -> bool:
+    global _auto_sprint_applying
+
+    if pawn is None or not bool(auto_sprint_option.value):
+        return False
+
+    wanted = not _walk_override_active
+    try:
+        _auto_sprint_applying = True
+        pawn.SetWantsToSprint(wanted)
+        if wanted:
+            movement = _get_move_component(pawn)
+            if movement is not None:
+                try:
+                    movement.bWantsToStartSprinting = True
+                except Exception:
+                    pass
+    except Exception as exc:
+        _error(f"Auto Sprint: failed to set native sprint intent: {exc}")
+        return False
+    finally:
+        _auto_sprint_applying = False
+
+    return True
+
+
+def _release_auto_sprint(pawn: UObject | None) -> None:
+    global _auto_sprint_applying
+
+    if pawn is None:
+        return
+    try:
+        _auto_sprint_applying = True
+        pawn.SetWantsToSprint(False)
+    except Exception:
+        pass
+    finally:
+        _auto_sprint_applying = False
+
+
+def _sprint_input_pre(
+    obj: UObject,
+    _args: WrappedStruct,
+    _ret: Any,
+    func: BoundFunction,
+) -> None:
+    global _walk_override_active
+
+    if not bool(auto_sprint_option.value):
+        return
+
+    pawn = _get_current_pawn()
+    if not _ability_belongs_to_pawn(obj, pawn):
+        return
+
+    event = _sprint_event_by_path.get(_bound_function_path(func))
+    mode = _walk_override_mode()
+
+    if event == "pressed":
+        if mode == WALK_OVERRIDE_HOLD:
+            _walk_override_active = True
+        elif mode == WALK_OVERRIDE_TOGGLE:
+            _walk_override_active = not _walk_override_active
+        else:
+            _walk_override_active = False
+    elif event == "released" and mode == WALK_OVERRIDE_HOLD:
+        _walk_override_active = False
+
+
+def _sprint_input_post(
+    obj: UObject,
+    _args: WrappedStruct,
+    _ret: Any,
+    _func: BoundFunction,
+) -> None:
+    if not bool(auto_sprint_option.value):
+        return
+    pawn = _get_current_pawn()
+    if _ability_belongs_to_pawn(obj, pawn):
+        _apply_auto_sprint_intent(pawn)
+
+
+def _remove_sprint_dynamic_hooks() -> None:
+    global _sprint_dynamic_hooks
+    global _sprint_event_by_path
+
+    for path, hook_type, identifier in tuple(_sprint_dynamic_hooks):
+        try:
+            remove_hook(path, hook_type, identifier)
+        except Exception:
+            pass
+    _sprint_dynamic_hooks = []
+    _sprint_event_by_path = {}
+
+
+def _install_sprint_dynamic_hooks() -> bool:
+    global _sprint_dynamic_hooks
+    global _sprint_event_by_path
+
+    if _sprint_dynamic_hooks:
+        return True
+
+    _ability, bindings = _find_action_bindings("PlayerAbility_Sprint_C", "Sprint")
+    if not bindings:
+        return False
+
+    installed: list[tuple[str, Type, str]] = []
+    event_map: dict[str, str] = {}
+    for index, (path, event) in enumerate(sorted(bindings.items())):
+        try:
+            if unrealsdk.find_object("Function", path) is None:
+                continue
+            pre_id = f"{_SPRINT_DYNAMIC_ID_PREFIX}:pre:{index}"
+            post_id = f"{_SPRINT_DYNAMIC_ID_PREFIX}:post:{index}"
+            add_hook(path, Type.PRE, pre_id, _sprint_input_pre)
+            add_hook(path, Type.POST, post_id, _sprint_input_post)
+        except Exception:
+            try:
+                remove_hook(path, Type.PRE, pre_id)
+            except Exception:
+                pass
+            continue
+        installed.append((path, Type.PRE, pre_id))
+        installed.append((path, Type.POST, post_id))
+        event_map[path] = event
+
+    _sprint_dynamic_hooks = installed
+    _sprint_event_by_path = event_map
+    return "pressed" in event_map.values() and "released" in event_map.values()
+
+
 def _reset_flow_state() -> None:
     global _sprint_chain_armed
     global _resume_sprint_after_landing
@@ -527,6 +894,8 @@ def _reset_flow_state() -> None:
     global _air_slide_intent
     global _crouch_input_held
     global _air_crouch_tap_pending
+    global _auto_sprint_applying
+    global _walk_override_active
 
     _sprint_chain_armed = False
     _resume_sprint_after_landing = False
@@ -536,6 +905,8 @@ def _reset_flow_state() -> None:
     _air_slide_intent = False
     _crouch_input_held = False
     _air_crouch_tap_pending = False
+    _auto_sprint_applying = False
+    _walk_override_active = False
 
 
 def _crouch_slide_mode() -> str:
@@ -559,7 +930,11 @@ def _restore_remembered_sprint(pawn: UObject | None, reason: str) -> bool:
     global _restoring_sprint
     global _sprint_chain_armed
 
-    if pawn is None or not bool(remember_sprint_option.value):
+    if (
+        pawn is None
+        or bool(auto_sprint_option.value)
+        or not bool(remember_sprint_option.value)
+    ):
         _resume_sprint_after_landing = False
         return False
 
@@ -589,9 +964,15 @@ def _on_enable() -> None:
     _reset_flow_state()
     _apply_current_values()
     _install_crouch_dynamic_hooks()
+    _install_sprint_dynamic_hooks()
+    _apply_auto_sprint_intent(_get_current_pawn())
 
 
 def _on_disable() -> None:
+    pawn = _get_current_pawn()
+    if bool(auto_sprint_option.value):
+        _release_auto_sprint(pawn)
+    _remove_sprint_dynamic_hooks()
     _remove_crouch_dynamic_hooks()
     _reset_flow_state()
     _restore_all()
@@ -608,7 +989,11 @@ def _set_wants_to_sprint(
     global _resume_sprint_after_landing
 
 
-    if _restoring_sprint or not _same_uobject(obj, _get_current_pawn()):
+    if (
+        _restoring_sprint
+        or _auto_sprint_applying
+        or not _same_uobject(obj, _get_current_pawn())
+    ):
         return
 
     try:
@@ -618,6 +1003,11 @@ def _set_wants_to_sprint(
 
 
     if requested:
+        return
+
+    if bool(auto_sprint_option.value):
+        if not _walk_override_active:
+            _apply_auto_sprint_intent(obj)
         return
 
     _sprint_chain_armed = False
@@ -675,6 +1065,7 @@ def _on_jumped(
     global _air_crouch_tap_pending
 
     _install_crouch_dynamic_hooks()
+    _install_sprint_dynamic_hooks()
 
     if not _same_uobject(obj, _get_current_pawn()):
         return
@@ -682,7 +1073,7 @@ def _on_jumped(
     _landing_crouch_pending = False
     _air_crouch_tap_pending = False
 
-    if not bool(remember_sprint_option.value):
+    if bool(auto_sprint_option.value) or not bool(remember_sprint_option.value):
         _resume_sprint_after_landing = False
         return
 
@@ -755,7 +1146,10 @@ def _finalize_landing_after_walking(pawn: UObject | None, source: str) -> None:
     _air_crouch_tap_pending = False
 
     if not slide_requested:
-        _restore_remembered_sprint(pawn, f"{source} MOVE_Walking")
+        if bool(auto_sprint_option.value):
+            _apply_auto_sprint_intent(pawn)
+        else:
+            _restore_remembered_sprint(pawn, f"{source} MOVE_Walking")
 
 
 @hook("/Script/Engine.Character:K2_OnMovementModeChanged", Type.POST)
@@ -831,8 +1225,11 @@ def _set_wants_to_slide(
     if requested:
         return
 
-    if _resume_sprint_after_landing and not falling and not _is_sliding(obj):
-        _restore_remembered_sprint(obj, "slide")
+    if not falling and not _is_sliding(obj):
+        if bool(auto_sprint_option.value):
+            _apply_auto_sprint_intent(obj)
+        elif _resume_sprint_after_landing:
+            _restore_remembered_sprint(obj, "slide")
 
 
 @hook("/Script/Engine.PlayerController:ClientRestart", Type.POST)
@@ -860,6 +1257,8 @@ def _client_restart(
     acceleration, braking = _current_values()
     _apply_to_pawn(pawn, acceleration, braking, report_failure=True)
     _install_crouch_dynamic_hooks()
+    _install_sprint_dynamic_hooks()
+    _apply_auto_sprint_intent(pawn)
 
 
 def _on_profile_change(_option: SpinnerOption, new_value: str) -> None:
@@ -946,12 +1345,41 @@ def _on_brake_change(_option: SliderOption, new_value: float) -> None:
         _apply_to_pawn(_get_current_pawn(), acceleration, braking)
 
 
+def _on_movement_feature_change(_option: Any, _new_value: Any) -> None:
+    if mod.is_enabled:
+        _apply_current_values()
+
+
+def _on_auto_sprint_change(_option: BoolOption, new_value: bool) -> None:
+    global _walk_override_active
+
+    _walk_override_active = False
+    if not mod.is_enabled:
+        return
+
+    pawn = _get_current_pawn()
+    _install_sprint_dynamic_hooks()
+    if bool(new_value):
+        _apply_auto_sprint_intent(pawn)
+    else:
+        _release_auto_sprint(pawn)
+
+
+def _on_walk_override_change(_option: SpinnerOption, _new_value: str) -> None:
+    global _walk_override_active
+
+    _walk_override_active = False
+    if mod.is_enabled and bool(auto_sprint_option.value):
+        _apply_auto_sprint_intent(_get_current_pawn())
+
+
 def _sanitize_loaded_settings(mod_obj: Mod) -> None:
     global _syncing_options
 
     corrected = False
     profile = str(profile_option.value)
     crouch_mode = str(crouch_slide_mode_option.value)
+    walk_mode = str(walk_override_option.value)
     legacy_slide = legacy_slide_from_landing_option.value
 
     _syncing_options = True
@@ -959,6 +1387,25 @@ def _sanitize_loaded_settings(mod_obj: Mod) -> None:
         if crouch_mode not in CROUCH_SLIDE_MODES:
             crouch_slide_mode_option.value = CROUCH_SLIDE_OFF
             crouch_mode = CROUCH_SLIDE_OFF
+            corrected = True
+
+        if walk_mode not in WALK_OVERRIDE_MODES:
+            walk_override_option.value = WALK_OVERRIDE_HOLD
+            corrected = True
+
+        safe_air_control = _safe_float_value(
+            air_control_option.value,
+            1.0,
+            AIR_CONTROL_MIN,
+            AIR_CONTROL_MAX,
+            "Air Control",
+        )
+        try:
+            current_air_control = float(air_control_option.value)
+        except (TypeError, ValueError):
+            current_air_control = float("nan")
+        if not math.isfinite(current_air_control) or current_air_control != safe_air_control:
+            air_control_option.value = safe_air_control
             corrected = True
 
         if isinstance(legacy_slide, bool):
@@ -1041,5 +1488,20 @@ mod = build_mod(
 profile_option.set_on_change(_on_profile_change, anytime=True, while_enabled=False)
 accel_option.set_on_change(_on_accel_change, anytime=True, while_enabled=False)
 brake_option.set_on_change(_on_brake_change, anytime=True, while_enabled=False)
+air_control_override_option.set_on_change(
+    _on_movement_feature_change, anytime=True, while_enabled=False
+)
+air_control_option.set_on_change(
+    _on_movement_feature_change, anytime=True, while_enabled=False
+)
+any_direction_sprint_option.set_on_change(
+    _on_movement_feature_change, anytime=True, while_enabled=False
+)
+auto_sprint_option.set_on_change(
+    _on_auto_sprint_change, anytime=True, while_enabled=False
+)
+walk_override_option.set_on_change(
+    _on_walk_override_change, anytime=True, while_enabled=False
+)
 
 _sanitize_loaded_settings(mod)
