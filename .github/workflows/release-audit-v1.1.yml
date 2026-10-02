@@ -1,0 +1,240 @@
+name: Temporary SnappyMovement v1.1 release audit
+
+on:
+  push:
+    branches:
+      - release-v1.1
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile and no-slop audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check --quiet ruff==0.13.2
+          ruff check __init__.py --select F401,F821,F841 --output-format concise
+
+          python - <<'PY'
+          from pathlib import Path
+          import ast
+          import hashlib
+          import re
+          import tomllib
+          import zipfile
+
+          source = Path("__init__.py")
+          text = source.read_text(encoding="utf-8")
+          tree = ast.parse(text, filename=str(source))
+          compile(text, "__init__.py", "exec")
+
+          # Release hygiene: no diagnostics, experimental input paths, or internal migrations.
+          forbidden = (
+              "togglediag",
+              "airresponse",
+              "airproof",
+              "airfix",
+              "autosprintfix",
+              "moveprobe",
+              "movediag",
+              "diagnostic",
+              "_PLAYER_MOVE_HOOK",
+              "InputAction_Continuous_Vector_Impl",
+              "ReceiveTick",
+              "PlayerTick",
+              "GameViewportClient:Tick",
+              "OakPlayerController:InputKey",
+              "Velocity =",
+              "MaxWalkSpeed =",
+              "MaxSprintSpeed =",
+              "logging.warning",
+              "HiddenOption",
+              "legacy_slide_from_landing",
+              "v1.3",
+              "v1.2",
+              "v1.1.0",
+              "v1.1.3",
+              "v0.2",
+          )
+          for needle in forbidden:
+              assert needle not in text, needle
+
+          # Proven production hook and mutation surfaces.
+          assert text.count("@hook(") == 9
+          assert text.count("add_hook(") == 3
+          assert text.count("remove_hook(") == 3
+          assert text.count("component.AirControl =") == 3
+          assert text.count("component.MaxAcceleration =") == 2
+          assert text.count("component.BrakingDecelerationWalking =") == 2
+          assert text.count("component.MaxSprintAngle =") == 2
+          assert text.count("pawn.SetWantsToSlide(True)") == 1
+          assert text.count("pawn.SetWantsToSprint(wanted)") == 1
+          assert text.count("movement.bWantsToStartSprinting = wanted") == 1
+
+          # Native UObject snapshots must dedupe by native identity, not wrapper identity.
+          assert "if _same_uobject(record[0], component):" in text
+          assert "record[0] is component" not in text
+
+          # Self-generated sprint state changes cannot recursively drive sprint lifecycle hooks.
+          for name in ("_on_start_sprinting", "_on_end_sprinting"):
+              start = text.index(f"def {name}(")
+              end = text.index("@hook(", start)
+              block = text[start:end]
+              assert "_auto_sprint_applying" in block, name
+              assert block.index("_auto_sprint_applying") < block.index("_get_current_pawn()"), name
+
+          # Dynamic crouch hooks must reject partial installs.
+          crouch_start = text.index("def _install_crouch_dynamic_hooks(")
+          crouch_end = text.index("def _input_event_name(", crouch_start)
+          crouch = text[crouch_start:crouch_end]
+          assert "_CROUCH_INPUT_FN_4" in crouch
+          assert "_CROUCH_INPUT_FN_5" in crouch
+          assert "_remove_crouch_dynamic_hooks()" in crouch
+
+          # Dynamic sprint hooks must reject partial installs and be owned only when needed.
+          sprint_start = text.index("def _install_sprint_dynamic_hooks(")
+          sprint_end = text.index("def _sync_sprint_dynamic_hooks(", sprint_start)
+          sprint = text[sprint_start:sprint_end]
+          assert '"pressed" in _sprint_event_by_path.values()' in sprint
+          assert '"released" in _sprint_event_by_path.values()' in sprint
+          assert "_remove_sprint_dynamic_hooks()" in sprint
+
+          sync_start = text.index("def _sync_sprint_dynamic_hooks(")
+          sync_end = text.index("def _reset_flow_state(", sync_start)
+          sync = text[sync_start:sync_end]
+          assert "auto_sprint_enabled: bool | None = None" in sync
+          assert "walk_override_mode: str | None = None" in sync
+          assert "needs_hooks = enabled and mode != WALK_OVERRIDE_DISABLED" in sync
+          assert "_remove_sprint_dynamic_hooks()" in sync
+          assert "_install_sprint_dynamic_hooks()" in sync
+
+          def block(name: str, next_name: str) -> str:
+              start = text.index(f"def {name}(")
+              end = text.index(f"def {next_name}(", start)
+              return text[start:end]
+
+          # mods_base invokes on_change before storing option.value.
+          air_override = block("_on_air_control_override_change", "_on_air_control_change")
+          air_value = block("_on_air_control_change", "_on_any_direction_sprint_change")
+          any_dir = block("_on_any_direction_sprint_change", "_on_auto_sprint_change")
+          auto = block("_on_auto_sprint_change", "_on_walk_override_change")
+          walk = block("_on_walk_override_change", "_sanitize_loaded_settings")
+
+          assert "air_control_override=bool(new_value)" in air_override
+          assert "air_control_override_option.value" not in air_override
+          assert "air_control_value=float(new_value)" in air_value
+          assert "air_control_option.value" not in air_value
+          assert "any_direction_sprint=bool(new_value)" in any_dir
+          assert "any_direction_sprint_option.value" not in any_dir
+
+          assert "enabled = bool(new_value)" in auto
+          assert "auto_sprint_enabled=enabled" in auto
+          assert "_set_auto_sprint_native_intent(pawn, True)" in auto
+          assert "auto_sprint_option.value" not in auto
+          assert "_apply_auto_sprint_intent(pawn)" not in auto
+
+          assert "_walk_override_mode(new_value)" in walk
+          assert "walk_override_option.value" not in walk
+
+          # No persisted migration of debug-only Air Control values.
+          sanitize_start = text.index("def _sanitize_loaded_settings(")
+          sanitize_end = text.index("HOOKS = (", sanitize_start)
+          sanitize = text[sanitize_start:sanitize_end]
+          assert "air_control_option.value =" not in sanitize
+          assert "legacy" not in sanitize.lower()
+
+          # No dead top-level functions or constants.
+          top_defs = [
+              n.name for n in tree.body
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+          ]
+          loaded_names = [
+              n.id for n in ast.walk(tree)
+              if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+          ]
+          for name in top_defs:
+              assert name in loaded_names, f"dead top-level function: {name}"
+
+          constants = [
+              n.targets[0].id
+              for n in tree.body
+              if isinstance(n, ast.Assign)
+              and len(n.targets) == 1
+              and isinstance(n.targets[0], ast.Name)
+              and re.fullmatch(r"[A-Z][A-Z0-9_]*", n.targets[0].id)
+          ]
+          for name in constants:
+              refs = sum(
+                  1 for n in ast.walk(tree)
+                  if isinstance(n, ast.Name) and n.id == name
+              )
+              assert refs > 1, f"dead top-level constant: {name}"
+
+          # Basic source hygiene.
+          assert "\t" not in text
+          assert not re.search(r"\n{4,}", text)
+          assert all(line == line.rstrip() for line in text.splitlines())
+
+          # Release version and docs must match the public feature set.
+          meta = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+          assert meta["project"]["version"] == "1.1"
+          assert meta["tool"]["sdkmod"]["version"] == "1.1"
+
+          readme = Path("README.md").read_text(encoding="utf-8")
+          readme_ru = Path("README_RU.md").read_text(encoding="utf-8")
+          for doc in (readme, readme_ru):
+              for term in (
+                  "Air Control",
+                  "Auto Sprint",
+                  "Sprint in All Directions",
+                  "Remember Sprint",
+                  "Crouch Landing Slide",
+                  "MaxSprintAngle",
+              ):
+                  assert term in doc, term
+              assert "0.6-20.0" in doc
+              assert "Section 7" in doc
+
+          # Package exactly the six release files.
+          stage = Path("stage/SnappyMovement")
+          stage.mkdir(parents=True, exist_ok=True)
+          payload = (
+              "__init__.py",
+              "pyproject.toml",
+              "README.md",
+              "README_RU.md",
+              "LICENSE",
+              "ADDITIONAL_TERMS.md",
+          )
+          for name in payload:
+              (stage / name).write_bytes(Path(name).read_bytes())
+
+          archive = Path("dist/SnappyMovement.sdkmod")
+          archive.parent.mkdir(exist_ok=True)
+          with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+              for path in sorted(stage.rglob("*")):
+                  if path.is_file():
+                      zf.write(path, path.relative_to(stage.parent).as_posix())
+
+          with zipfile.ZipFile(archive) as zf:
+              names = [n for n in zf.namelist() if n and not n.endswith("/")]
+              assert {n.split("/", 1)[0] for n in names} == {"SnappyMovement"}
+              assert sorted(n.split("/", 1)[1] for n in names) == sorted(payload)
+
+          print("source_sha256", hashlib.sha256(source.read_bytes()).hexdigest())
+          print("artifact_sha256", hashlib.sha256(archive.read_bytes()).hexdigest())
+          print("RELEASE_V11_NO_SLOP_PASS")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SnappyMovement-v1.1-release
+          path: dist/SnappyMovement.sdkmod
+          if-no-files-found: error
