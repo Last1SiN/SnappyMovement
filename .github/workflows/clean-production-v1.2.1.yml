@@ -1,0 +1,63 @@
+name: Temporary SnappyMovement clean production v1.2.1
+
+on:
+  push:
+    branches:
+      - cleanup-production-v1.2.1
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate clean production baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import ast, tomllib
+
+          text = Path("__init__.py").read_text(encoding="utf-8")
+          ast.parse(text)
+          compile(text, "__init__.py", "exec")
+
+          for forbidden in (
+              "actiondiag", "bindingdiag", "crouchdiag", "hookcheck",
+              "[SnappyMovement raw]", "[SnappyMovement test]",
+              "_GBX_DISCRETE_ACTION_HOOK", "_gbx_discrete_action_probe",
+              "_log_crouch_binding_metadata", "_binding_event_debug",
+          ):
+              assert forbidden not in text, forbidden
+
+          for required in (
+              "_CROUCH_INPUT_FN_4",
+              "_CROUCH_INPUT_FN_5",
+              "_CROUCH_FLUSH_FN",
+              "def _crouch_input_callback(",
+              "def _crouch_flush_callback(",
+              "if _is_falling(pawn):",
+              "_air_crouch_tap_pending = True",
+              "def _should_slide_from_landing(",
+              "pawn.SetWantsToSlide(True)",
+              "pawn.SetWantsToSprint(True)",
+              "get_pc(possibly_loading=True)",
+              "hooks=HOOKS",
+          ):
+              assert required in text, required
+
+          assert text.count("@hook(") == 9
+          assert text.count("add_hook(") == 1
+          assert text.count("remove_hook(") == 1
+          assert text.count("pawn.SetWantsToSlide(True)") == 1
+          assert text.count("pawn.SetWantsToSprint(True)") == 1
+
+          meta = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+          assert meta["project"]["version"] == "1.2.1"
+          assert meta["tool"]["sdkmod"]["version"] == "1.2.1"
+          print("CLEAN_PRODUCTION_V121_GATES_PASS")
+          PY
