@@ -137,10 +137,9 @@ _CROUCH_INPUT_FN_5 = (
     "K2Node_GbxInputActionEvent_Discrete_5"
 )
 _CROUCH_FLUSH_FN = "FlushCrouchInput"
-_CROUCH_DYNAMIC_ID_PREFIX = "snappymovement:crouch-input-diag:v1.2.0"
+_CROUCH_DYNAMIC_ID_PREFIX = "snappymovement:crouch-input:v1.2.1"
 _crouch_dynamic_hooks: list[tuple[str, str]] = []
 
-_GBX_DISCRETE_ACTION_HOOK = "/Script/GbxInput.GbxInputComponent:StartInputAction_Discrete_Impl"
 
 
 def _error(message: str) -> None:
@@ -415,129 +414,6 @@ def _bound_function_path(func: BoundFunction) -> str:
 
 
 
-@hook(_GBX_DISCRETE_ACTION_HOOK, Type.POST)
-def _gbx_discrete_action_probe(
-    obj: UObject,
-    args: WrappedStruct,
-    _ret: Any,
-    _func: BoundFunction,
-) -> None:
-    try:
-        action = args.DiscreteAction
-    except Exception:
-        return
-
-    try:
-        action_name = str(action.ActionName)
-    except Exception:
-        action_name = "<unreadable>"
-
-    if action_name.lower() != "crouch":
-        return
-
-    pawn = _get_current_pawn()
-    movement = _get_move_component(pawn) if pawn is not None else None
-    try:
-        consumed = bool(args.bConsumeEvent)
-    except Exception:
-        consumed = False
-
-    logging.warning(
-        "[SnappyMovement actiondiag] Crouch "
-        f"component={_path(obj)!r} action={_path(action)!r} "
-        f"consume={consumed} pawn={_path(pawn)!r} "
-        f"falling={_is_falling(pawn)} "
-        f"wants_crouch={_wants_crouch(pawn)} "
-        f"wants_slide={_movement_flag(movement, 'bWantsToSlide')}"
-    )
-
-
-def _binding_event_debug(value: Any) -> tuple[str, str]:
-    try:
-        event_name = str(value.name)
-    except Exception:
-        event_name = str(value)
-    try:
-        raw = getattr(value, "value", value)
-        event_value = str(int(raw))
-    except Exception:
-        event_value = repr(value)
-    return event_name, event_value
-
-
-def _log_crouch_binding_metadata(cls: UObject) -> bool:
-    class_path = _path(cls)
-
-    try:
-        dynamic_bindings = list(cls.DynamicBindingObjects)
-    except Exception as exc:
-        logging.warning(
-            "[SnappyMovement bindingdiag] DynamicBindingObjects unavailable "
-            f"class={class_path!r} error={type(exc).__name__}:{exc}"
-        )
-        return False
-
-    logging.warning(
-        "[SnappyMovement bindingdiag] dynamic bindings "
-        f"class={class_path!r} count={len(dynamic_bindings)} "
-        f"paths={[ _path(x) for x in dynamic_bindings ]!r}"
-    )
-
-    matches = 0
-    for binding_obj in dynamic_bindings:
-        try:
-            entries = list(binding_obj.InputActionReceiverDelegateBindings)
-        except Exception:
-            continue
-
-        for entry in entries:
-            try:
-                action = entry.Action
-            except Exception:
-                action = None
-
-            try:
-                action_name = str(action.ActionName)
-            except Exception:
-                action_name = "<unreadable>"
-
-            if action_name.lower() != "crouch":
-                continue
-
-            try:
-                input_event = entry.InputEvent
-            except Exception:
-                input_event = None
-            event_name, event_value = _binding_event_debug(input_event)
-
-            try:
-                function_name = str(entry.FunctionNameToBind)
-            except Exception:
-                function_name = "<unreadable>"
-
-            function_path = f"{class_path}:{function_name}"
-            try:
-                found = unrealsdk.find_object("Function", function_path) is not None
-            except Exception:
-                found = False
-
-            matches += 1
-            logging.warning(
-                "[SnappyMovement bindingdiag] Crouch binding "
-                f"binding={_path(binding_obj)!r} "
-                f"action={_path(action)!r} "
-                f"input_event_name={event_name!r} "
-                f"input_event_value={event_value!r} "
-                f"function={function_name!r} "
-                f"path={function_path!r} found={found}"
-            )
-
-    logging.warning(
-        "[SnappyMovement bindingdiag] Crouch binding summary "
-        f"class={class_path!r} matches={matches}"
-    )
-    return matches > 0
-
 
 def _ability_belongs_to_pawn(ability: UObject, pawn: UObject | None) -> bool:
     if pawn is None:
@@ -551,60 +427,7 @@ def _ability_belongs_to_pawn(ability: UObject, pawn: UObject | None) -> bool:
     return ability_path.startswith(f"{pawn_path}.")
 
 
-def _crouch_probe_callback(
-    obj: UObject,
-    args: WrappedStruct,
-    _ret: Any,
-    func: BoundFunction,
-) -> None:
-    global _crouch_input_held
-    global _air_crouch_tap_pending
-
-    pawn = _get_current_pawn()
-    movement = _get_move_component(pawn) if pawn is not None else None
-
-    try:
-        action = args.Action
-    except Exception:
-        action = None
-
-    try:
-        action_name = str(action.ActionName)
-    except Exception:
-        action_name = "<unreadable>"
-
-    function_path = _bound_function_path(func)
-    local_context = _ability_belongs_to_pawn(obj, pawn)
-    if function_path.endswith(_CROUCH_INPUT_FN_4):
-        input_event = "IE_Pressed"
-        if local_context:
-            _crouch_input_held = True
-            if _is_falling(pawn):
-                _air_crouch_tap_pending = True
-    elif function_path.endswith(_CROUCH_INPUT_FN_5):
-        input_event = "IE_Released"
-        if local_context:
-            _crouch_input_held = False
-    else:
-        input_event = "<unknown>"
-
-    logging.warning(
-        "[SnappyMovement crouchdiag] event "
-        f"input_event={input_event!r} "
-        f"func={function_path!r} "
-        f"ability={_path(obj)!r} "
-        f"action={_path(action)!r} action_name={action_name!r} "
-        f"pawn={_path(pawn)!r} "
-        f"local_context={local_context} "
-        f"falling={_is_falling(pawn)} "
-        f"held={_crouch_input_held} "
-        f"tap_pending={_air_crouch_tap_pending} "
-        f"wants_crouch={_wants_crouch(pawn)} "
-        f"wants_slide={_movement_flag(movement, 'bWantsToSlide')}"
-    )
-
-
-def _crouch_flush_probe(
+def _crouch_input_callback(
     obj: UObject,
     _args: WrappedStruct,
     _ret: Any,
@@ -614,24 +437,33 @@ def _crouch_flush_probe(
     global _air_crouch_tap_pending
 
     pawn = _get_current_pawn()
-    movement = _get_move_component(pawn) if pawn is not None else None
-    local_context = _ability_belongs_to_pawn(obj, pawn)
-    if local_context:
-        _crouch_input_held = False
-        _air_crouch_tap_pending = False
+    if not _ability_belongs_to_pawn(obj, pawn):
+        return
 
-    logging.warning(
-        "[SnappyMovement crouchdiag] flush "
-        f"func={_bound_function_path(func)!r} "
-        f"ability={_path(obj)!r} "
-        f"pawn={_path(pawn)!r} "
-        f"local_context={local_context} "
-        f"falling={_is_falling(pawn)} "
-        f"held={_crouch_input_held} "
-        f"tap_pending={_air_crouch_tap_pending} "
-        f"wants_crouch={_wants_crouch(pawn)} "
-        f"wants_slide={_movement_flag(movement, 'bWantsToSlide')}"
-    )
+    function_path = _bound_function_path(func)
+    if function_path.endswith(_CROUCH_INPUT_FN_4):
+        _crouch_input_held = True
+        if _is_falling(pawn):
+            _air_crouch_tap_pending = True
+    elif function_path.endswith(_CROUCH_INPUT_FN_5):
+        _crouch_input_held = False
+
+
+def _crouch_flush_callback(
+    obj: UObject,
+    _args: WrappedStruct,
+    _ret: Any,
+    _func: BoundFunction,
+) -> None:
+    global _crouch_input_held
+    global _air_crouch_tap_pending
+
+    pawn = _get_current_pawn()
+    if not _ability_belongs_to_pawn(obj, pawn):
+        return
+
+    _crouch_input_held = False
+    _air_crouch_tap_pending = False
 
 
 def _remove_crouch_dynamic_hooks() -> None:
@@ -653,75 +485,34 @@ def _install_crouch_dynamic_hooks() -> bool:
 
     try:
         abilities = list(unrealsdk.find_all("PlayerAbility_Crouch_C", exact=False))
-    except Exception as exc:
-        logging.warning(
-            "[SnappyMovement crouchdiag] ability search failed "
-            f"error={type(exc).__name__}:{exc}"
-        )
+    except Exception:
         return False
 
-    live_abilities = []
-    for ability in abilities:
-        path = _path(ability)
-        if "Default__" in path:
-            continue
-        live_abilities.append(ability)
-
-    logging.warning(
-        "[SnappyMovement crouchdiag] ability search "
-        f"total={len(abilities)} live={len(live_abilities)} "
-        f"paths={[ _path(x) for x in live_abilities ]!r}"
+    live_ability = next(
+        (ability for ability in abilities if "Default__" not in _path(ability)),
+        None,
     )
-
-    if not live_abilities:
+    if live_ability is None:
         return False
 
-    cls = live_abilities[0].Class
-    class_path = _path(cls)
-    logging.warning(
-        "[SnappyMovement crouchdiag] class "
-        f"path={class_path!r}"
-    )
-
-    _log_crouch_binding_metadata(cls)
-
+    class_path = _path(live_ability.Class)
     targets = (
-        (_CROUCH_INPUT_FN_4, _crouch_probe_callback),
-        (_CROUCH_INPUT_FN_5, _crouch_probe_callback),
-        (_CROUCH_FLUSH_FN, _crouch_flush_probe),
+        (_CROUCH_INPUT_FN_4, _crouch_input_callback),
+        (_CROUCH_INPUT_FN_5, _crouch_input_callback),
+        (_CROUCH_FLUSH_FN, _crouch_flush_callback),
     )
 
     installed: list[tuple[str, str]] = []
     for index, (name, callback) in enumerate(targets):
         path = f"{class_path}:{name}"
         try:
-            fn = unrealsdk.find_object("Function", path)
-            found = fn is not None
-        except Exception:
-            found = False
-
-        logging.warning(
-            "[SnappyMovement crouchdiag] resolve "
-            f"path={path!r} found={found}"
-        )
-        if not found:
-            continue
-
-        identifier = f"{_CROUCH_DYNAMIC_ID_PREFIX}:{index}"
-        try:
+            if unrealsdk.find_object("Function", path) is None:
+                continue
+            identifier = f"{_CROUCH_DYNAMIC_ID_PREFIX}:{index}"
             add_hook(path, Type.POST, identifier, callback)
-        except Exception as exc:
-            logging.warning(
-                "[SnappyMovement crouchdiag] hook install failed "
-                f"path={path!r} error={type(exc).__name__}:{exc}"
-            )
+        except Exception:
             continue
-
         installed.append((path, identifier))
-        logging.warning(
-            "[SnappyMovement crouchdiag] hook installed "
-            f"path={path!r}"
-        )
 
     _crouch_dynamic_hooks = installed
     return len(installed) >= 2
@@ -791,30 +582,12 @@ def _restore_remembered_sprint(pawn: UObject | None, reason: str) -> bool:
 
     _resume_sprint_after_landing = False
     _sprint_chain_armed = True
-    logging.warning(f"[SnappyMovement test] Remember Sprint restored after {reason}")
     return True
 
 
 def _on_enable() -> None:
     _reset_flow_state()
     _apply_current_values()
-    controller = _find_local_controller()
-    pawn = _get_current_pawn()
-    logging.warning(
-        "[SnappyMovement test] enabled "
-        f"remember_sprint={bool(remember_sprint_option.value)} "
-        f"crouch_slide_mode={_crouch_slide_mode()!r} "
-        f"controller={_path(controller)!r} pawn={_path(pawn)!r}"
-    )
-    try:
-        _gbx_target = unrealsdk.find_object("Function", _GBX_DISCRETE_ACTION_HOOK)
-        _gbx_found = _gbx_target is not None
-    except Exception:
-        _gbx_found = False
-    logging.warning(
-        "[SnappyMovement actiondiag] target "
-        f"path={_GBX_DISCRETE_ACTION_HOOK!r} found={_gbx_found}"
-    )
     _install_crouch_dynamic_hooks()
 
 
@@ -834,10 +607,6 @@ def _set_wants_to_sprint(
     global _sprint_chain_armed
     global _resume_sprint_after_landing
 
-    logging.warning(
-        "[SnappyMovement raw] SetWantsToSprint "
-        f"obj={_path(obj)!r} current={_path(_get_current_pawn())!r}"
-    )
 
     if _restoring_sprint or not _same_uobject(obj, _get_current_pawn()):
         return
@@ -847,10 +616,6 @@ def _set_wants_to_sprint(
     except Exception:
         return
 
-    logging.warning(
-        "[SnappyMovement test] SetWantsToSprint "
-        f"requested={requested} restoring={_restoring_sprint}"
-    )
 
     if requested:
         return
@@ -871,7 +636,6 @@ def _on_start_sprinting(
     if not _same_uobject(obj, _get_current_pawn()):
         return
 
-    logging.warning("[SnappyMovement test] OnStartSprinting")
     if bool(remember_sprint_option.value):
         _sprint_chain_armed = True
 
@@ -888,11 +652,6 @@ def _on_end_sprinting(
     if not _same_uobject(obj, _get_current_pawn()) or not bool(remember_sprint_option.value):
         return
 
-    logging.warning(
-        "[SnappyMovement test] OnEndSprinting "
-        f"falling={_is_falling(obj)} sliding={_is_sliding(obj)} "
-        f"wants={_wants_sprint(obj)}"
-    )
 
     if _is_falling(obj) or _is_sliding(obj):
         return
@@ -915,10 +674,6 @@ def _on_jumped(
     global _landing_crouch_pending
     global _air_crouch_tap_pending
 
-    logging.warning(
-        "[SnappyMovement raw] OnJumped "
-        f"obj={_path(obj)!r} current={_path(_get_current_pawn())!r}"
-    )
     _install_crouch_dynamic_hooks()
 
     if not _same_uobject(obj, _get_current_pawn()):
@@ -939,14 +694,7 @@ def _on_jumped(
     )
     _resume_sprint_after_landing = bool(sprint_related)
 
-    logging.warning(
-        "[SnappyMovement test] OnJumped "
-        f"sprint_related={sprint_related} "
-        f"remember_pending={_resume_sprint_after_landing}"
-    )
 
-    if _resume_sprint_after_landing:
-        logging.warning("[SnappyMovement test] Remember Sprint armed for landing")
 
 
 @hook(
@@ -962,27 +710,12 @@ def _on_landed_post(
     global _landing_crouch_pending
     global _landing_transition_pending
 
-    logging.warning(
-        "[SnappyMovement raw] OnLanded "
-        f"obj={_path(obj)!r} current={_path(_get_current_pawn())!r}"
-    )
 
     if not _same_uobject(obj, _get_current_pawn()):
         return
 
     _landing_transition_pending = True
-    mode = _crouch_slide_mode()
     _landing_crouch_pending = _should_slide_from_landing(obj)
-
-    logging.warning(
-        "[SnappyMovement test] landing captured POST "
-        f"mode={mode!r} "
-        f"crouch={_landing_crouch_pending} "
-        f"crouch_held={_crouch_input_held} "
-        f"tap_pending={_air_crouch_tap_pending} "
-        f"air_slide_intent={_air_slide_intent} "
-        f"remember_pending={_resume_sprint_after_landing}"
-    )
 
 
 def _finalize_landing_after_walking(pawn: UObject | None, source: str) -> None:
@@ -1014,10 +747,6 @@ def _finalize_landing_after_walking(pawn: UObject | None, source: str) -> None:
         try:
             pawn.SetWantsToSlide(True)
             slide_requested = True
-            logging.warning(
-                "[SnappyMovement test] Slide from Landing requested "
-                f"after {source} MOVE_Walking"
-            )
         except Exception as exc:
             _error(f"Slide from Landing: failed to request native slide: {exc}")
 
@@ -1026,11 +755,7 @@ def _finalize_landing_after_walking(pawn: UObject | None, source: str) -> None:
     _air_crouch_tap_pending = False
 
     if not slide_requested:
-        restored = _restore_remembered_sprint(pawn, f"{source} MOVE_Walking")
-        logging.warning(
-            "[SnappyMovement test] landing finalized "
-            f"source={source} remember_restored={restored}"
-        )
+        _restore_remembered_sprint(pawn, f"{source} MOVE_Walking")
 
 
 @hook("/Script/Engine.Character:K2_OnMovementModeChanged", Type.POST)
@@ -1049,10 +774,6 @@ def _movement_mode_changed(
     except Exception:
         return
 
-    logging.warning(
-        "[SnappyMovement test] K2 movement mode "
-        f"new={new_mode} pending={_landing_transition_pending}"
-    )
 
     if new_mode == 1:
         _finalize_landing_after_walking(obj, "K2")
@@ -1079,10 +800,6 @@ def _movement_component_mode_changed(
     except Exception:
         return
 
-    logging.warning(
-        "[SnappyMovement test] movement component mode "
-        f"new={new_mode} pending={_landing_transition_pending}"
-    )
 
     if new_mode == 1:
         _finalize_landing_after_walking(pawn, "SetMovementMode")
@@ -1097,10 +814,6 @@ def _set_wants_to_slide(
 ) -> None:
     global _air_slide_intent
 
-    logging.warning(
-        "[SnappyMovement raw] SetWantsToSlide "
-        f"obj={_path(obj)!r} current={_path(_get_current_pawn())!r}"
-    )
 
     if not _same_uobject(obj, _get_current_pawn()):
         return
@@ -1111,10 +824,6 @@ def _set_wants_to_slide(
         return
 
     falling = _is_falling(obj)
-    logging.warning(
-        "[SnappyMovement test] SetWantsToSlide "
-        f"requested={requested} falling={falling}"
-    )
 
     if falling:
         _air_slide_intent = requested
@@ -1317,7 +1026,6 @@ HOOKS = (
     _movement_mode_changed,
     _movement_component_mode_changed,
     _set_wants_to_slide,
-    _gbx_discrete_action_probe,
     _client_restart,
 )
 
@@ -1327,24 +1035,6 @@ mod = build_mod(
     on_enable=_on_enable,
     on_disable=_on_disable,
 )
-
-for _hook_obj in HOOKS:
-    try:
-        _expected = len(_hook_obj.hook_funcs)
-        _active = _hook_obj.get_active_count()
-        if mod.is_enabled and _active != _expected:
-            _hook_obj.enable()
-            _active = _hook_obj.get_active_count()
-        logging.warning(
-            "[SnappyMovement hookcheck] "
-            f"name={_hook_obj.__name__} active={_active}/{_expected}"
-        )
-    except Exception as exc:
-        logging.error(
-            "[SnappyMovement hookcheck] "
-            f"name={getattr(_hook_obj, '__name__', '<unknown>')} "
-            f"error={type(exc).__name__}:{exc}"
-        )
 
 # build_mod() loads persisted settings before returning. Attach callbacks afterwards so loading
 # old settings does not accidentally turn a saved preset into Custom.
