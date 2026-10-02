@@ -4,7 +4,7 @@ import math
 from typing import Any
 
 import unrealsdk
-from mods_base import BoolOption, Game, HiddenOption, Mod, SliderOption, SpinnerOption, build_mod, get_pc, hook
+from mods_base import BoolOption, Game, Mod, SliderOption, SpinnerOption, build_mod, get_pc, hook
 from unrealsdk import logging
 from unrealsdk.hooks import Type, add_hook, remove_hook
 from unrealsdk.unreal import BoundFunction, UObject, WrappedStruct
@@ -161,11 +161,6 @@ any_direction_sprint_option = BoolOption(
     ),
 )
 
-legacy_slide_from_landing_option = HiddenOption(
-    identifier="slide_from_landing",
-    value=None,
-)
-
 crouch_slide_mode_option = SpinnerOption(
     "crouch_slide_mode",
     CROUCH_SLIDE_OFF,
@@ -190,7 +185,6 @@ OPTIONS = (
     auto_sprint_option,
     walk_override_option,
     any_direction_sprint_option,
-    legacy_slide_from_landing_option,
     crouch_slide_mode_option,
 )
 
@@ -310,7 +304,7 @@ def _current_values(profile: str | None = None) -> tuple[float, float]:
 
 def _find_local_controller() -> UObject | None:
     # Oak's local controller is exposed directly by mods_base. This is the same
-    # path proven by the earlier SnappyMovement diagnostics.
+    # proven local-controller path used by SnappyMovement runtime hooks.
     try:
         controller = get_pc(possibly_loading=True)
     except Exception:
@@ -1548,7 +1542,6 @@ def _sanitize_loaded_settings(mod_obj: Mod) -> None:
     profile = str(profile_option.value)
     crouch_mode = str(crouch_slide_mode_option.value)
     walk_mode = str(walk_override_option.value)
-    legacy_slide = legacy_slide_from_landing_option.value
 
     _syncing_options = True
     try:
@@ -1559,12 +1552,6 @@ def _sanitize_loaded_settings(mod_obj: Mod) -> None:
 
         if walk_mode not in WALK_OVERRIDE_MODES:
             walk_override_option.value = WALK_OVERRIDE_HOLD
-            corrected = True
-
-        if isinstance(legacy_slide, bool):
-            if legacy_slide and crouch_mode == CROUCH_SLIDE_OFF:
-                crouch_slide_mode_option.value = CROUCH_SLIDE_HOLD
-            legacy_slide_from_landing_option.value = None
             corrected = True
 
         if profile in PRESETS:
