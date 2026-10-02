@@ -204,11 +204,6 @@ _crouch_input_held = False
 _air_crouch_tap_pending = False
 _auto_sprint_applying = False
 _walk_override_active = False
-_move_input_active = False
-_move_probe_logged = False
-
-_PLAYER_MOVE_HOOK = "/Script/OakGame.OakInputAbility_Player_Common:PlayerMove"
-
 _CROUCH_INPUT_FN_4 = (
     "GbxInpActEvt_InputAction_Discrete_Crouch_"
     "K2Node_GbxInputActionEvent_Discrete_4"
@@ -218,10 +213,10 @@ _CROUCH_INPUT_FN_5 = (
     "K2Node_GbxInputActionEvent_Discrete_5"
 )
 _CROUCH_FLUSH_FN = "FlushCrouchInput"
-_CROUCH_DYNAMIC_ID_PREFIX = "snappymovement:crouch-input:v1.3.0"
+_CROUCH_DYNAMIC_ID_PREFIX = "snappymovement:crouch-input:v1.3.5"
 _crouch_dynamic_hooks: list[tuple[str, str]] = []
 
-_SPRINT_DYNAMIC_ID_PREFIX = "snappymovement:sprint-input:v1.3.0"
+_SPRINT_DYNAMIC_ID_PREFIX = "snappymovement:sprint-input:v1.3.5"
 _sprint_dynamic_hooks: list[tuple[str, Type, str]] = []
 _sprint_event_by_path: dict[str, str] = {}
 
@@ -883,50 +878,6 @@ def _sprint_input_post(
         _apply_auto_sprint_intent(pawn)
 
 
-@hook(_PLAYER_MOVE_HOOK, Type.POST)
-def _player_move(
-    obj: UObject,
-    args: WrappedStruct,
-    _ret: Any,
-    _func: BoundFunction,
-) -> None:
-    global _move_input_active
-    global _move_probe_logged
-
-    if not bool(auto_sprint_option.value):
-        _move_input_active = False
-        return
-
-    pawn = _get_current_pawn()
-    if not _ability_belongs_to_pawn(obj, pawn):
-        return
-
-    try:
-        value = args.Val
-        magnitude_sq = float(value.X) ** 2 + float(value.Y) ** 2
-    except Exception:
-        return
-
-    active = magnitude_sq > 0.0001
-    if not active:
-        _move_input_active = False
-        return
-
-    if _move_input_active:
-        return
-
-    _move_input_active = True
-    if not _move_probe_logged:
-        logging.warning(
-            "[SnappyMovement moveprobe] "
-            f"PlayerMove local callback magnitude_sq={magnitude_sq:.4f}"
-        )
-        _move_probe_logged = True
-
-    if not _walk_override_active:
-        _apply_auto_sprint_intent(pawn)
-
-
 def _remove_sprint_dynamic_hooks() -> None:
     global _sprint_dynamic_hooks
     global _sprint_event_by_path
@@ -987,8 +938,6 @@ def _reset_flow_state() -> None:
     global _air_crouch_tap_pending
     global _auto_sprint_applying
     global _walk_override_active
-    global _move_input_active
-    global _move_probe_logged
 
     _sprint_chain_armed = False
     _resume_sprint_after_landing = False
@@ -1000,8 +949,6 @@ def _reset_flow_state() -> None:
     _air_crouch_tap_pending = False
     _auto_sprint_applying = False
     _walk_override_active = False
-    _move_input_active = False
-    _move_probe_logged = False
 
 
 def _crouch_slide_mode() -> str:
@@ -1060,21 +1007,6 @@ def _on_enable() -> None:
     _apply_current_values()
     _install_crouch_dynamic_hooks()
     _install_sprint_dynamic_hooks()
-
-    try:
-        target_found = unrealsdk.find_object("Function", _PLAYER_MOVE_HOOK) is not None
-    except Exception:
-        target_found = False
-    try:
-        active = _player_move.get_active_count()
-        expected = len(_player_move.hook_funcs)
-    except Exception:
-        active = -1
-        expected = -1
-    logging.warning(
-        "[SnappyMovement moveprobe] "
-        f"target={_PLAYER_MOVE_HOOK!r} found={target_found} active={active}/{expected}"
-    )
 
     _apply_auto_sprint_intent(_get_current_pawn())
 
@@ -1150,13 +1082,21 @@ def _on_end_sprinting(
 ) -> None:
     global _sprint_chain_armed
 
-    if (
-        not _same_uobject(obj, _get_current_pawn())
-        or bool(auto_sprint_option.value)
-        or not bool(remember_sprint_option.value)
-    ):
+    if not _same_uobject(obj, _get_current_pawn()):
         return
 
+    if bool(auto_sprint_option.value):
+        if not _walk_override_active:
+            restored = _apply_auto_sprint_intent(obj)
+            if restored:
+                logging.warning(
+                    "[SnappyMovement autosprintfix] "
+                    "re-armed native sprint intent after OnEndSprinting"
+                )
+        return
+
+    if not bool(remember_sprint_option.value):
+        return
 
     if _is_falling(obj) or _is_sliding(obj):
         return
@@ -1476,10 +1416,8 @@ def _on_auto_sprint_change(_option: BoolOption, new_value: bool) -> None:
     global _walk_override_active
     global _sprint_chain_armed
     global _resume_sprint_after_landing
-    global _move_input_active
 
     _walk_override_active = False
-    _move_input_active = False
     _sprint_chain_armed = False
     _resume_sprint_after_landing = False
     if not mod.is_enabled:
@@ -1597,7 +1535,6 @@ def _sanitize_loaded_settings(mod_obj: Mod) -> None:
 
 
 HOOKS = (
-    _player_move,
     _set_wants_to_sprint,
     _on_start_sprinting,
     _on_end_sprinting,
