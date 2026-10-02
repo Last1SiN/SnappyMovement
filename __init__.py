@@ -44,7 +44,7 @@ ACCEL_MIN = 1000.0
 ACCEL_MAX = 150000.0
 BRAKE_MIN = 1000.0
 BRAKE_MAX = 180000.0
-AIR_CONTROL_MIN = 0.0
+AIR_CONTROL_MIN = 0.6
 AIR_CONTROL_MAX = 20.0
 ANY_DIRECTION_SPRINT_ANGLE = 180.0
 
@@ -102,15 +102,16 @@ air_control_override_option = BoolOption(
 
 air_control_option = SliderOption(
     "air_control",
-    1.0,
+    0.6,
     AIR_CONTROL_MIN,
     AIR_CONTROL_MAX,
     0.1,
     is_integer=False,
     display_name="Air Control",
     description=(
-        "Air steering strength from 0 to 20. 0 disables steering; higher values make "
-        "direction changes increasingly immediate. Only used while Air Control Override is on."
+        "Air steering strength from the game's normal 0.6 up to 20. "
+        "Higher values make direction changes increasingly immediate. "
+        "Only used while Air Control Override is on."
     ),
 )
 
@@ -204,6 +205,9 @@ _crouch_input_held = False
 _air_crouch_tap_pending = False
 _auto_sprint_applying = False
 _walk_override_active = False
+_airproof_start_xy: tuple[float, float] | None = None
+_airproof_start_speed = 0.0
+_airproof_start_value: float | None = None
 _CROUCH_INPUT_FN_4 = (
     "GbxInpActEvt_InputAction_Discrete_Crouch_"
     "K2Node_GbxInputActionEvent_Discrete_4"
@@ -213,10 +217,10 @@ _CROUCH_INPUT_FN_5 = (
     "K2Node_GbxInputActionEvent_Discrete_5"
 )
 _CROUCH_FLUSH_FN = "FlushCrouchInput"
-_CROUCH_DYNAMIC_ID_PREFIX = "snappymovement:crouch-input:v1.3.5"
+_CROUCH_DYNAMIC_ID_PREFIX = "snappymovement:crouch-input:v1.3.6"
 _crouch_dynamic_hooks: list[tuple[str, str]] = []
 
-_SPRINT_DYNAMIC_ID_PREFIX = "snappymovement:sprint-input:v1.3.5"
+_SPRINT_DYNAMIC_ID_PREFIX = "snappymovement:sprint-input:v1.3.6"
 _sprint_dynamic_hooks: list[tuple[str, Type, str]] = []
 _sprint_event_by_path: dict[str, str] = {}
 
@@ -444,7 +448,7 @@ def _apply_to_pawn(
         if bool(air_control_override_option.value):
             target_air_control = _safe_float_value(
                 air_control_option.value,
-                1.0,
+                0.6,
                 AIR_CONTROL_MIN,
                 AIR_CONTROL_MAX,
                 "Air Control",
@@ -497,7 +501,7 @@ def _apply_air_control_override(
 
     target = _safe_float_value(
         air_control_option.value,
-        1.0,
+        0.6,
         AIR_CONTROL_MIN,
         AIR_CONTROL_MAX,
         "Air Control",
@@ -600,6 +604,37 @@ def _wants_sprint(pawn: UObject | None) -> bool:
 def _wants_crouch(pawn: UObject | None) -> bool:
     return _movement_bool(pawn, "GetWantsToCrouch")
 
+
+def _airproof_actor_xy(pawn: UObject | None) -> tuple[float, float] | None:
+    if pawn is None:
+        return None
+    try:
+        location = pawn.K2_GetActorLocation()
+        return float(location.X), float(location.Y)
+    except Exception:
+        return None
+
+
+def _airproof_state(pawn: UObject | None) -> tuple[float | None, float | None]:
+    if pawn is None:
+        return None, None
+
+    movement = _get_move_component(pawn)
+    if movement is None:
+        return None, None
+
+    try:
+        actual = float(movement.AirControl)
+    except Exception:
+        actual = None
+
+    try:
+        velocity = movement.Velocity
+        speed_xy = math.hypot(float(velocity.X), float(velocity.Y))
+    except Exception:
+        speed_xy = None
+
+    return actual, speed_xy
 
 
 def _bound_function_path(func: BoundFunction) -> str:
@@ -938,6 +973,9 @@ def _reset_flow_state() -> None:
     global _air_crouch_tap_pending
     global _auto_sprint_applying
     global _walk_override_active
+    global _airproof_start_xy
+    global _airproof_start_speed
+    global _airproof_start_value
 
     _sprint_chain_armed = False
     _resume_sprint_after_landing = False
@@ -949,6 +987,9 @@ def _reset_flow_state() -> None:
     _air_crouch_tap_pending = False
     _auto_sprint_applying = False
     _walk_override_active = False
+    _airproof_start_xy = None
+    _airproof_start_speed = 0.0
+    _airproof_start_value = None
 
 
 def _crouch_slide_mode() -> str:
@@ -1087,12 +1128,7 @@ def _on_end_sprinting(
 
     if bool(auto_sprint_option.value):
         if not _walk_override_active:
-            restored = _apply_auto_sprint_intent(obj)
-            if restored:
-                logging.warning(
-                    "[SnappyMovement autosprintfix] "
-                    "re-armed native sprint intent after OnEndSprinting"
-                )
+            _apply_auto_sprint_intent(obj)
         return
 
     if not bool(remember_sprint_option.value):
@@ -1118,6 +1154,9 @@ def _on_jumped(
     global _resume_sprint_after_landing
     global _landing_crouch_pending
     global _air_crouch_tap_pending
+    global _airproof_start_xy
+    global _airproof_start_speed
+    global _airproof_start_value
 
     _install_crouch_dynamic_hooks()
     _install_sprint_dynamic_hooks()
@@ -1128,6 +1167,15 @@ def _on_jumped(
     _landing_crouch_pending = False
     _air_crouch_tap_pending = False
     _apply_air_control_override(obj)
+
+    if bool(air_control_override_option.value):
+        _airproof_start_xy = _airproof_actor_xy(obj)
+        _airproof_start_value, start_speed = _airproof_state(obj)
+        _airproof_start_speed = float(start_speed or 0.0)
+    else:
+        _airproof_start_xy = None
+        _airproof_start_value = None
+        _airproof_start_speed = 0.0
 
     if bool(auto_sprint_option.value) or not bool(remember_sprint_option.value):
         _resume_sprint_after_landing = False
@@ -1156,13 +1204,36 @@ def _on_landed_post(
 ) -> None:
     global _landing_crouch_pending
     global _landing_transition_pending
-
+    global _airproof_start_xy
+    global _airproof_start_speed
+    global _airproof_start_value
 
     if not _same_uobject(obj, _get_current_pawn()):
         return
 
     _landing_transition_pending = True
     _landing_crouch_pending = _should_slide_from_landing(obj)
+
+    if bool(air_control_override_option.value):
+        end_xy = _airproof_actor_xy(obj)
+        land_actual, end_speed = _airproof_state(obj)
+        if _airproof_start_xy is not None and end_xy is not None:
+            dx = end_xy[0] - _airproof_start_xy[0]
+            dy = end_xy[1] - _airproof_start_xy[1]
+            distance = math.hypot(dx, dy)
+            logging.warning(
+                "[SnappyMovement airproof] "
+                f"target={float(air_control_option.value):.3f} "
+                f"jump_actual={_airproof_start_value!r} "
+                f"land_actual={land_actual!r} "
+                f"start_speed_xy={_airproof_start_speed:.3f} "
+                f"end_speed_xy={end_speed!r} "
+                f"dx={dx:.3f} dy={dy:.3f} distance_xy={distance:.3f}"
+            )
+
+    _airproof_start_xy = None
+    _airproof_start_value = None
+    _airproof_start_speed = 0.0
 
 
 def _finalize_landing_after_walking(pawn: UObject | None, source: str) -> None:
@@ -1435,10 +1506,8 @@ def _on_auto_sprint_change(_option: BoolOption, new_value: bool) -> None:
 
 def _on_walk_override_change(_option: SpinnerOption, _new_value: str) -> None:
     global _walk_override_active
-    global _move_input_active
 
     _walk_override_active = False
-    _move_input_active = False
     if mod.is_enabled and bool(auto_sprint_option.value):
         _apply_auto_sprint_intent(_get_current_pawn())
 
@@ -1465,7 +1534,7 @@ def _sanitize_loaded_settings(mod_obj: Mod) -> None:
 
         safe_air_control = _safe_float_value(
             air_control_option.value,
-            1.0,
+            0.6,
             AIR_CONTROL_MIN,
             AIR_CONTROL_MAX,
             "Air Control",
